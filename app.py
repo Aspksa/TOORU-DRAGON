@@ -574,6 +574,7 @@ class Storage:
             'last_success': config['last_success'],
             'messages': self.ai_messages('chat', 100),
             'usage': self.usage_summary(),
+            'suggestions': self.brain_suggestions('pending', 20),
         }
 
     def chat_send(self, item):
@@ -625,12 +626,13 @@ class Storage:
             }
             for entry in context
         ]
-        self.add_ai_message(
+        tori_message_id = self.add_ai_message(
             'chat', 'tori', result['text'],
             input_tokens=result['input_tokens'], output_tokens=result['output_tokens'],
             context=visible_context
         )
         self.mark_ai_success()
+        self.brain_reflect(clean, result['text'], tori_message_id)
         return self.chat_state()
 
     def learning_state(self):
@@ -887,6 +889,11 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
             'Не утверждай, что помнишь данные, которых нет в переданной истории. '
             'Если информации недостаточно, скажи об этом прямо.'
         )
+    elif purpose == 'reflection':
+        instructions = (
+            'Ты внутренний аналитический модуль Тори. '
+            'Не разговаривай с пользователем. Возвращай только валидный JSON без Markdown.'
+        )
     else:
         instructions = (
             'Ты Qwen — источник знаний для личного помощника Тори. '
@@ -1091,6 +1098,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.learning_action(item))
                 elif self.path == '/api/chat/send':
                     self.send(200, storage.chat_send(item))
+                elif self.path == '/api/brain/action':
+                    self.send(200, storage.decide_brain_suggestion(item))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
                 else:
