@@ -1131,7 +1131,12 @@ class Storage:
                     "AND lower(topic)=lower(?) AND lower(question)=lower(?) LIMIT 1",
                     (gap['topic'], gap['question'])
                 ).fetchone()
-                if duplicate:
+                learned = db.execute(
+                    "SELECT 1 FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
+                    "AND status IN ('pending','running','done') LIMIT 1",
+                    (gap['topic'], gap['question'])
+                ).fetchone()
+                if duplicate or learned:
                     continue
                 db.execute(
                     "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
@@ -1389,6 +1394,14 @@ class Storage:
                         (kind, title)
                     ).fetchone()
                     if exists:
+                        continue
+                if kind == 'learning':
+                    learned = db.execute(
+                        "SELECT 1 FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
+                        "AND status IN ('pending','running','done') LIMIT 1",
+                        (topic, question)
+                    ).fetchone()
+                    if learned:
                         continue
                 cursor = db.execute(
                     'INSERT INTO brain_suggestions(kind,title,body,topic,question,reason,confidence,source_message_id) '
@@ -1923,13 +1936,21 @@ class Storage:
         clean_topic = topic.strip()
         clean_question = question.strip()
         with self.connect() as db:
+            duplicate = db.execute(
+                "SELECT id,status FROM learning_queue WHERE lower(topic)=lower(?) "
+                "AND lower(question)=lower(?) AND status IN ('pending','running','done') "
+                "ORDER BY id DESC LIMIT 1",
+                (clean_topic, clean_question)
+            ).fetchone()
+            if duplicate:
+                return {'id': duplicate['id'], 'status': duplicate['status'], 'duplicate': True}
             cursor = db.execute(
                 'INSERT INTO learning_queue(topic,question) VALUES (?,?)',
                 (clean_topic, clean_question)
             )
             queue_id = cursor.lastrowid
         self.add_ai_message('learning', 'tori', clean_question, queue_id=queue_id)
-        return {'id': queue_id}
+        return {'id': queue_id, 'status': 'pending', 'duplicate': False}
 
     def learning_action(self, item):
         queue_id = item.get('id')
@@ -2246,6 +2267,17 @@ class Storage:
         self.mark_ai_success()
         if review:
             self.create_review_suggestions(review)
+            summary = str(review.get('summary') or '').strip()
+            verdict = str(review.get('verdict') or '')
+            if summary:
+                self.save_work_context({
+                    'last_decision': 'Результат обучения: ' + summary[:1000],
+                    'next_step': (
+                        'Применить подтверждённое знание к активной задаче.'
+                        if verdict == 'good'
+                        else 'Проверить пробелы из самопроверки перед применением.'
+                    ),
+                }, source='learning')
         goal_id = self.finish_goal_learning(queue_id)
         self.enforce_learning_budget()
         return {'ok': True, 'goal_id': goal_id}
