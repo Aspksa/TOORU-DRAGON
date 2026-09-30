@@ -1145,6 +1145,7 @@ class Storage:
                 'INSERT OR REPLACE INTO settings VALUES (?,?)',
                 [
                     ('brain_auto_learning', '1' if enabled else '0'),
+                    ('learning_mode', 'running' if enabled else 'paused'),
                     ('brain_auto_min_confidence', str(min_confidence)),
                     ('brain_auto_daily_limit', str(daily_limit)),
                     ('brain_auto_chain_limit', str(chain_limit)),
@@ -1468,6 +1469,146 @@ class Storage:
                 created += 1
         return created
 
+    def finish_goal_learning(self, queue_id):
+        matched_goal = None
+        with self.connect() as db:
+            goals = db.execute(
+                "SELECT id,plan_json,progress_json FROM brain_goals WHERE status='active' ORDER BY id DESC"
+            ).fetchall()
+            for goal in goals:
+                try:
+                    plan = json.loads(goal['plan_json'] or '[]')
+                except (ValueError, TypeError):
+                    plan = []
+                changed = False
+                for step in plan:
+                    if not isinstance(step, dict):
+                        continue
+                    if step.get('queue_id') == queue_id and step.get('type') == 'learning':
+                        if step.get('status') != 'done':
+                            step['status'] = 'done'
+                            changed = True
+                        matched_goal = goal['id']
+                        break
+                if changed:
+                    try:
+                        progress = json.loads(goal['progress_json'] or '{}')
+                        if not isinstance(progress, dict):
+                            progress = {}
+                    except (ValueError, TypeError):
+                        progress = {}
+                    progress['last_learning_queue_id'] = queue_id
+                    progress['last_learning_completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+                    db.execute(
+                        "UPDATE brain_goals SET plan_json=?,progress_json=?,"
+                        "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                        (json.dumps(plan, ensure_ascii=False),
+                         json.dumps(progress, ensure_ascii=False), goal['id'])
+                    )
+                if matched_goal is not None:
+                    break
+        return matched_goal
+
+    def auto_rethink_goal(self, goal_id):
+        if type(goal_id) is not int or self.usage_summary()['blocked']:
+            return None
+        with self.connect() as db:
+            settings = dict(db.execute(
+                "SELECT key,value FROM settings WHERE key IN ('brain_auto_learning','learning_mode')"
+            ).fetchall())
+            row = db.execute(
+                "SELECT id,title,description,plan_json,progress_json FROM brain_goals "
+                "WHERE id=? AND status='active'", (goal_id,)
+            ).fetchone()
+        if not row or settings.get('brain_auto_learning') != '1' or settings.get('learning_mode') != 'running':
+            return None
+        try:
+            plan = json.loads(row['plan_json'] or '[]')
+            if not isinstance(plan, list):
+                plan = []
+        except (ValueError, TypeError):
+            plan = []
+        try:
+            progress = json.loads(row['progress_json'] or '{}')
+            if not isinstance(progress, dict):
+                progress = {}
+        except (ValueError, TypeError):
+            progress = {}
+        completed = [
+            {'title': step.get('title',''), 'topic': step.get('topic',''), 'question': step.get('question','')}
+            for step in plan if isinstance(step, dict) and step.get('status') == 'done'
+        ][-6:]
+        prompt = (
+            'Переоцени активную цель после завершённого обучения. Верни только JSON: '
+            '{"summary":"...","assessment":"continue|ready|blocked",'
+            '"new_steps":[{"title":"...","type":"learning|action","topic":"...","question":"...","reason":"..."}]}. '
+            'Учитывай уже завершённые шаги. Не повторяй существующие шаги. '
+            'Если для следующего решения не хватает знаний — добавь learning. '
+            'action означает действие пользователя/системы и никогда не выполняется автоматически. '
+            'Максимум 4 новых шага.\n\n'
+            'Цель: ' + row['title'] + '\nОписание: ' + row['description']
+            + '\nТекущий план: ' + json.dumps(plan, ensure_ascii=False)
+            + '\nЗавершённое обучение: ' + json.dumps(completed, ensure_ascii=False)
+        )
+        result = call_yandex_ai(self, prompt, max_output_tokens=900, purpose='planning')
+        self.add_ai_message(
+            'brain', 'system', 'Автопереоценка цели после обучения',
+            input_tokens=result['input_tokens'], output_tokens=result['output_tokens']
+        )
+        data = self._parse_json_object(result['text'])
+        existing_keys = {
+            (
+                str(step.get('type') or ''),
+                str(step.get('topic') or '').strip().lower(),
+                str(step.get('question') or '').strip().lower(),
+                str(step.get('title') or '').strip().lower(),
+            )
+            for step in plan if isinstance(step, dict)
+        }
+        added = 0
+        raw_steps = data.get('new_steps', []) if isinstance(data.get('new_steps'), list) else []
+        for raw in raw_steps[:4]:
+            if not isinstance(raw, dict):
+                continue
+            step_type = raw.get('type')
+            if step_type not in {'learning','action'}:
+                continue
+            step = {
+                'title': str(raw.get('title') or '').strip()[:300],
+                'type': step_type,
+                'topic': str(raw.get('topic') or '').strip()[:300],
+                'question': str(raw.get('question') or '').strip()[:8000],
+                'reason': str(raw.get('reason') or '').strip()[:1000],
+                'status': 'pending',
+                'auto_generated': True,
+            }
+            if not step['title']:
+                continue
+            if step_type == 'learning' and (not step['topic'] or not step['question']):
+                continue
+            key = (step_type, step['topic'].lower(), step['question'].lower(), step['title'].lower())
+            if key in existing_keys:
+                continue
+            plan.append(step)
+            existing_keys.add(key)
+            added += 1
+        assessment = data.get('assessment')
+        if assessment not in {'continue','ready','blocked'}:
+            assessment = 'continue'
+        progress.update({
+            'summary': str(data.get('summary') or progress.get('summary') or '').strip()[:2000],
+            'auto_assessment': assessment,
+            'auto_rethought_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'auto_added_steps': added,
+        })
+        with self.connect() as db:
+            db.execute(
+                "UPDATE brain_goals SET plan_json=?,progress_json=?,"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (json.dumps(plan, ensure_ascii=False), json.dumps(progress, ensure_ascii=False), goal_id)
+            )
+        return {'goal_id': goal_id, 'assessment': assessment, 'added_steps': added}
+
     def complete_learning(self, queue_id, text, input_tokens=0, output_tokens=0, review=None):
         clean = text.strip()
         if not clean:
@@ -1498,8 +1639,9 @@ class Storage:
         self.mark_ai_success()
         if review:
             self.create_review_suggestions(review)
+        goal_id = self.finish_goal_learning(queue_id)
         self.enforce_learning_budget()
-        return True
+        return {'ok': True, 'goal_id': goal_id}
 
     def fail_learning(self, queue_id, error):
         message = str(error).strip()[:1000] or 'Неизвестная ошибка AI Studio.'
@@ -1682,10 +1824,16 @@ class LearningWorker(threading.Thread):
                 review = self.storage.review_learning_answer(
                     item['topic'], item['question'], result['text']
                 )
-                self.storage.complete_learning(
+                completed = self.storage.complete_learning(
                     item['id'], result['text'],
                     result['input_tokens'], result['output_tokens'], review
                 )
+                goal_id = completed.get('goal_id') if isinstance(completed, dict) else None
+                if goal_id is not None:
+                    try:
+                        self.storage.auto_rethink_goal(goal_id)
+                    except Exception as exc:
+                        logging.warning('Goal rethink %s failed: %s', goal_id, exc)
             except Exception as exc:
                 logging.warning('Learning task %s failed: %s', item['id'], exc)
                 self.storage.fail_learning(item['id'], exc)
