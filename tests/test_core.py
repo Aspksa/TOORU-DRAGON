@@ -163,6 +163,14 @@ class CoreTest(unittest.TestCase):
         self.assertTrue((extension / 'background.js').is_file())
         self.assertTrue((extension / 'content.js').is_file())
 
+    def test_learning_ui_uses_tori_browser_language(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        self.assertIn('Открыть Браузер Тори', ui)
+        self.assertIn('Текущая сессия', ui)
+        self.assertIn('Журнал обучения', ui)
+        self.assertNotIn('Открыть Chrome Тори', ui)
+        self.assertNotIn('data/browser-profile/chrome', ui)
+
     def test_duplicate_launcher_and_lock(self):
         lock = app.InstanceLock(Path(self.temp.name) / 'instance.lock')
         self.assertTrue(lock.acquire())
