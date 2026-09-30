@@ -223,15 +223,22 @@ class Storage:
         limit = max(1, min(int(limit), 200))
         with self.connect() as db:
             rows = [dict(row) for row in db.execute(
-                'SELECT id,channel,role,text,queue_id,input_tokens,output_tokens,created_at '
+                'SELECT id,channel,role,text,queue_id,input_tokens,output_tokens,context_json,created_at '
                 'FROM ai_messages WHERE channel=? ORDER BY id DESC LIMIT ?',
                 (channel, limit)
             )]
         rows.reverse()
+        for row in rows:
+            try:
+                row['context'] = json.loads(row.pop('context_json') or '[]')
+                if not isinstance(row['context'], list):
+                    row['context'] = []
+            except (ValueError, TypeError):
+                row['context'] = []
         return rows
 
     def add_ai_message(self, channel, role, text, queue_id=None,
-                       input_tokens=0, output_tokens=0):
+                       input_tokens=0, output_tokens=0, context=None):
         if channel not in {'chat', 'learning'}:
             raise ValueError('Неизвестный канал диалога.')
         if role not in {'user', 'tori', 'qwen', 'system'}:
@@ -241,9 +248,10 @@ class Storage:
         clean = text.strip()[:50000]
         with self.connect() as db:
             cursor = db.execute(
-                'INSERT INTO ai_messages(channel,role,text,queue_id,input_tokens,output_tokens) '
-                'VALUES (?,?,?,?,?,?)',
-                (channel, role, clean, queue_id, int(input_tokens or 0), int(output_tokens or 0))
+                'INSERT INTO ai_messages(channel,role,text,queue_id,input_tokens,output_tokens,context_json) '
+                'VALUES (?,?,?,?,?,?,?)',
+                (channel, role, clean, queue_id, int(input_tokens or 0), int(output_tokens or 0),
+                 json.dumps(context or [], ensure_ascii=False))
             )
         return cursor.lastrowid
 
