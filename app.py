@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import secrets
 import sqlite3
@@ -36,7 +37,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 4:
+            if version > 5:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -58,6 +59,7 @@ class Storage:
                     last_error TEXT NOT NULL DEFAULT '',
                     input_tokens INTEGER NOT NULL DEFAULT 0,
                     output_tokens INTEGER NOT NULL DEFAULT 0,
+                    context_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
@@ -118,6 +120,11 @@ class Storage:
                                  row['input_tokens'], row['output_tokens'], row['updated_at'])
                             )
                 db.execute('PRAGMA user_version=4')
+            if version < 5:
+                columns = {row['name'] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
+                if 'context_json' not in columns:
+                    db.execute("ALTER TABLE ai_messages ADD COLUMN context_json TEXT NOT NULL DEFAULT '[]'")
+                db.execute('PRAGMA user_version=5')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
@@ -216,15 +223,22 @@ class Storage:
         limit = max(1, min(int(limit), 200))
         with self.connect() as db:
             rows = [dict(row) for row in db.execute(
-                'SELECT id,channel,role,text,queue_id,input_tokens,output_tokens,created_at '
+                'SELECT id,channel,role,text,queue_id,input_tokens,output_tokens,context_json,created_at '
                 'FROM ai_messages WHERE channel=? ORDER BY id DESC LIMIT ?',
                 (channel, limit)
             )]
         rows.reverse()
+        for row in rows:
+            try:
+                row['context'] = json.loads(row.pop('context_json') or '[]')
+                if not isinstance(row['context'], list):
+                    row['context'] = []
+            except (ValueError, TypeError):
+                row['context'] = []
         return rows
 
     def add_ai_message(self, channel, role, text, queue_id=None,
-                       input_tokens=0, output_tokens=0):
+                       input_tokens=0, output_tokens=0, context=None):
         if channel not in {'chat', 'learning'}:
             raise ValueError('Неизвестный канал диалога.')
         if role not in {'user', 'tori', 'qwen', 'system'}:
@@ -234,11 +248,70 @@ class Storage:
         clean = text.strip()[:50000]
         with self.connect() as db:
             cursor = db.execute(
-                'INSERT INTO ai_messages(channel,role,text,queue_id,input_tokens,output_tokens) '
-                'VALUES (?,?,?,?,?,?)',
-                (channel, role, clean, queue_id, int(input_tokens or 0), int(output_tokens or 0))
+                'INSERT INTO ai_messages(channel,role,text,queue_id,input_tokens,output_tokens,context_json) '
+                'VALUES (?,?,?,?,?,?,?)',
+                (channel, role, clean, queue_id, int(input_tokens or 0), int(output_tokens or 0),
+                 json.dumps(context or [], ensure_ascii=False))
             )
         return cursor.lastrowid
+
+    @staticmethod
+    def _search_terms(text):
+        stop = {
+            'это','как','что','где','когда','кто','для','про','или','она','они','оно','его','ее','её',
+            'мне','меня','мой','моя','мои','твой','твоя','ты','вы','мы','же','бы','ли','на','в','во',
+            'с','со','по','из','за','до','от','у','к','и','а','но','не','да','есть','был','была'
+        }
+        return {
+            word for word in re.findall(r'[0-9A-Za-zА-Яа-яЁё_-]{2,}', text.lower())
+            if word not in stop
+        }
+
+    def relevant_context(self, query, limit=6, char_budget=6000):
+        terms = self._search_terms(query)
+        if not terms:
+            return []
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(
+                "SELECT id,kind,title,body,source,created_at FROM records "
+                "WHERE kind IN ('memory','knowledge') ORDER BY id DESC LIMIT 1000"
+            )]
+        ranked = []
+        for row in rows:
+            title = row['title'].lower()
+            body = row['body'].lower()
+            score = 0
+            matched = []
+            for term in terms:
+                title_hits = title.count(term)
+                body_hits = body.count(term)
+                if title_hits or body_hits:
+                    score += title_hits * 5 + min(body_hits, 4)
+                    matched.append(term)
+            if score:
+                ranked.append((score, row['id'], matched, row))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+        result = []
+        used = 0
+        for score, _row_id, matched, row in ranked[:max(limit * 3, limit)]:
+            allowance = max(0, char_budget - used)
+            if allowance < 200:
+                break
+            excerpt = row['body'].strip()[:min(1800, allowance)]
+            result.append({
+                'id': row['id'],
+                'kind': row['kind'],
+                'title': row['title'],
+                'source': row['source'],
+                'excerpt': excerpt,
+                'matched': matched[:8],
+                'score': score,
+            })
+            used += len(excerpt) + len(row['title']) + 80
+            if len(result) >= limit:
+                break
+        return result
 
     def chat_state(self):
         config = self.ai_config()
@@ -253,6 +326,7 @@ class Storage:
         text = item.get('text', '')
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 12000:
             raise ValueError('Сообщение должно содержать от 1 до 12 000 символов.')
+        use_context = item.get('use_context', True) is not False
         clean = text.strip()
         self.add_ai_message('chat', 'user', clean)
         history = self.ai_messages('chat', 14)
@@ -261,21 +335,45 @@ class Storage:
             role = {'user': 'Пользователь', 'tori': 'Тори'}.get(message['role'])
             if role:
                 transcript.append(f"{role}: {message['text']}")
-        prompt = clean
+
+        context = self.relevant_context(clean) if use_context else []
+        sections = []
         if transcript:
-            prompt = (
-                'Продолжи этот диалог, учитывая только приведённую историю беседы.\n\n'
-                + '\n\n'.join(transcript[-10:])
-                + '\n\nПользователь: ' + clean
+            sections.append('Недавняя история диалога:\n' + '\n\n'.join(transcript[-10:]))
+        if context:
+            blocks = []
+            for index, entry in enumerate(context, 1):
+                label = 'Память' if entry['kind'] == 'memory' else 'Знание'
+                blocks.append(
+                    f"[{index}] {label}: {entry['title']}\n"
+                    f"Источник: {entry['source']}\n{entry['excerpt']}"
+                )
+            sections.append(
+                'Релевантный локальный контекст TOORU. Используй его только если он относится к вопросу. '
+                'Не выдумывай отсутствующие сведения:\n\n' + '\n\n'.join(blocks)
             )
+        sections.append('Текущий вопрос пользователя:\n' + clean)
+        prompt = '\n\n---\n\n'.join(sections)
+
         try:
             result = call_yandex_ai(self, prompt, purpose='chat')
         except Exception as exc:
             self.add_ai_message('chat', 'system', 'Ошибка ответа: ' + str(exc)[:700])
             raise
+
+        visible_context = [
+            {
+                'id': entry['id'],
+                'kind': entry['kind'],
+                'title': entry['title'],
+                'source': entry['source'],
+            }
+            for entry in context
+        ]
         self.add_ai_message(
             'chat', 'tori', result['text'],
-            input_tokens=result['input_tokens'], output_tokens=result['output_tokens']
+            input_tokens=result['input_tokens'], output_tokens=result['output_tokens'],
+            context=visible_context
         )
         self.mark_ai_success()
         return self.chat_state()

@@ -173,6 +173,59 @@ class CoreTest(unittest.TestCase):
         public = self.request('/api/state')
         self.assertEqual(public['chat']['messages'][-1]['role'], 'tori')
 
+    def test_chat_rag_uses_only_relevant_memory_and_knowledge(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/records', {
+            'kind': 'memory', 'title': 'Любимый язык',
+            'body': 'Пользователь предпочитает Python для автоматизации.'
+        })
+        self.request('/api/records', {
+            'kind': 'knowledge', 'title': 'Python и SQLite',
+            'body': 'SQLite хорошо подходит для локальных приложений на Python.'
+        })
+        self.request('/api/records', {
+            'kind': 'knowledge', 'title': 'Сад',
+            'body': 'Помидоры любят солнечное место.'
+        })
+        with patch('app.call_yandex_ai', return_value={
+            'text': 'Используй Python и SQLite.', 'input_tokens': 30, 'output_tokens': 8
+        }) as call:
+            chat = self.request('/api/chat/send', {
+                'text': 'Что использовать для Python приложения с SQLite?',
+                'use_context': True,
+            })
+        prompt = call.call_args.args[1]
+        self.assertIn('Любимый язык', prompt)
+        self.assertIn('Python и SQLite', prompt)
+        self.assertNotIn('Помидоры', prompt)
+        context = chat['messages'][-1]['context']
+        self.assertEqual({item['title'] for item in context}, {'Любимый язык', 'Python и SQLite'})
+        self.assertNotIn('excerpt', context[0])
+
+    def test_chat_context_can_be_disabled(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/records', {
+            'kind': 'memory', 'title': 'Секретный контекст',
+            'body': 'Эта запись не должна попасть в отключённый RAG.'
+        })
+        with patch('app.call_yandex_ai', return_value={
+            'text': 'Ответ без памяти.', 'input_tokens': 4, 'output_tokens': 4
+        }) as call:
+            chat = self.request('/api/chat/send', {
+                'text': 'Секретный контекст',
+                'use_context': False,
+            })
+        self.assertNotIn('Эта запись не должна', call.call_args.args[1])
+        self.assertEqual(chat['messages'][-1]['context'], [])
+
     def test_extract_response_text_handles_null_content(self):
         response = {
             'output_text': None,
@@ -197,6 +250,8 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Разговор обучения', ui)
         self.assertIn('AI Studio', ui)
         self.assertIn('Qwen3.6 35B', ui)
+        self.assertIn('Память и знания', ui)
+        self.assertIn('Использовано:', ui)
         self.assertIn('Повторить', ui)
         self.assertIn('Пропустить', ui)
         self.assertIn('Отменить', ui)
@@ -243,11 +298,11 @@ class CoreTest(unittest.TestCase):
             self.assertIn('роутер', messages[0]['text'])
             self.assertIn('пакеты', messages[1]['text'])
 
-    def test_schema_v4_has_ai_messages(self):
+    def test_schema_v5_has_ai_messages_with_context(self):
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 5)
             columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
-        self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens'} <= columns)
+        self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens','context_json'} <= columns)
 
     def test_duplicate_launcher_and_lock(self):
         lock = app.InstanceLock(Path(self.temp.name) / 'instance.lock')
