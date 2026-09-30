@@ -145,7 +145,7 @@ class Storage:
                     db.execute("ALTER TABLE ai_messages ADD COLUMN context_json TEXT NOT NULL DEFAULT '[]'")
                 db.execute('PRAGMA user_version=5')
             if version < 6:
-                db.execute("""
+                db.executescript("""
                     CREATE TABLE IF NOT EXISTS brain_suggestions (
                         id INTEGER PRIMARY KEY,
                         kind TEXT NOT NULL,
