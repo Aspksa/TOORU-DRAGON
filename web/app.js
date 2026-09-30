@@ -33,7 +33,8 @@ function qwenPanel() {
   const bridgeText=q.connected?'Подключён':'Не подключён';
   const modeText={observe:'Тори наблюдает',paused:'Обучение на паузе',stopped:'Обучение остановлено'}[q.mode]||q.mode;
   const ownerText=q.owner==='tori'?'Диалог передан Тори':'Диалог у тебя';
-  const memoryCount=state.counts.memory||0, knowledgeCount=state.counts.knowledge||0;
+  const memoryCount=q.memory_count ?? state.counts.memory ?? 0;
+  const knowledgeCount=q.knowledge_count ?? state.counts.knowledge ?? 0;
   const queue=(q.queue||[]).map(x=>`<article class="record"><div class="row"><h3>${escapeHtml(x.topic)}</h3><span class="badge">${escapeHtml(x.status)}</span></div><p>${escapeHtml(x.question)}</p></article>`).join('');
   const events=(q.events||[]).slice(0,8).map(x=>`<article class="record"><div class="row"><h3>${x.role==='assistant'?'Qwen':'Пользователь'}</h3><span class="meta">${escapeHtml(new Date(x.created_at).toLocaleString('ru-RU'))}</span></div><p>${escapeHtml(x.text)}</p></article>`).join('');
   const startDisabled=q.mode==='observe'?'disabled':'';
@@ -99,10 +100,12 @@ async function refreshQwenStatus(){
     const bridgeHelp=document.getElementById('bridge-help');
     const learning=document.getElementById('learning-status');
     const owner=document.getElementById('owner-status');
+    const memory=document.getElementById('memory-status');
     if(bridge)bridge.textContent=q.connected?'Подключён':'Не подключён';
     if(bridgeHelp)bridgeHelp.textContent=q.connected?'Связь с открытой вкладкой Qwen есть':'Открой Chrome Тори и вкладку Qwen';
     if(learning)learning.textContent={observe:'Тори наблюдает',paused:'Обучение на паузе',stopped:'Обучение остановлено'}[q.mode]||q.mode;
     if(owner)owner.textContent=q.owner==='tori'?'Диалог передан Тори':'Диалог у тебя';
+    if(memory)memory.textContent=`${q.memory_count||0} память · ${q.knowledge_count||0} знания`;
   }catch(_error){}
 }
 setInterval(refreshQwenStatus,2000);
