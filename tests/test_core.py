@@ -145,6 +145,8 @@ class CoreTest(unittest.TestCase):
         self.assertTrue(state['qwen_connected'])
         status = self.request('/api/qwen/status')
         self.assertTrue(status['connected'])
+        self.assertEqual(status['memory_count'], 0)
+        self.assertEqual(status['knowledge_count'], 1)
         self.assertEqual(state['qwen']['queue'][0]['status'], 'done')
         self.assertEqual(state['records']['knowledge'][0]['source'], 'Qwen · https://chat.qwen.ai/c/test')
         self.assertIn('WAL', state['records']['knowledge'][0]['body'])
