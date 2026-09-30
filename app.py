@@ -180,7 +180,7 @@ class Storage:
         with self.connect() as db:
             db.execute(
                 "UPDATE learning_queue SET status='stale', "
-                "last_error='Ответ не завершён вовремя. Можно повторить задачу.', "
+                "last_error='Ответ не завершён вовремя. Нажми «Повторить».', "
                 "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
                 "WHERE status='running' AND updated_at<?",
                 (cutoff,)
