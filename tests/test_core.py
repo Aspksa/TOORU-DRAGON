@@ -954,7 +954,7 @@ class CoreTest(unittest.TestCase):
 
     def test_schema_v10_has_brain_and_dragon_tables(self):
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 9)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 10)
             columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
         self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens','context_json'} <= columns)
         with self.storage.connect() as db:
@@ -1080,7 +1080,7 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Проверить проект', ui)
         self.assertIn('Открыть Мозг', ui)
         self.assertIn('Резервная копия', ui)
-        self.assertIn('Последние действия', ui)
+        self.assertIn('Что Тоору делала', ui)
         self.assertIn('.dragon-hero', css)
         self.assertIn('.dragon-quick-grid', css)
         # Права больше не дублируются в общей странице Настройки.
