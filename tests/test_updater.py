@@ -90,7 +90,7 @@ class UpdaterTest(unittest.TestCase):
         payload = {
             'commit': {
                 'sha': 'c' * 40,
-                'commit': {'message': 'Improve updater UI\\n\\nShow description and changed files.'},
+                'commit': {'message': 'Improve updater UI\n\nShow description and changed files.'},
             }
         }
         with patch('updater.request_json', return_value=payload):
