@@ -128,8 +128,8 @@ function libraryPanel(kind,title,description,titleLabel,bodyLabel){
     <section class="panel library-intro"><span class="eyebrow">${kind==='memory'?'Личное':'База'}</span><h2>${title}</h2><p>${description}</p><strong class="big-count">${state.counts[kind]||0}</strong><span class="meta">записей</span></section>
     <form id="record-form-${kind}" data-kind="${kind}" class="panel clean-form">
       <h2>Добавить</h2>
-      <label for="record-title">${titleLabel}</label><input id="record-title" name="title" maxlength="300" required>
-      <label for="record-body">${bodyLabel}</label><textarea id="record-body" name="body" maxlength="20000"></textarea>
+      <label for="${kind}-record-title">${titleLabel}</label><input id="${kind}-record-title" name="title" maxlength="300" required>
+      <label for="${kind}-record-body">${bodyLabel}</label><textarea id="${kind}-record-body" name="body" maxlength="20000"></textarea>
       <button class="primary">Сохранить</button>
     </form>
   </div>
@@ -404,10 +404,10 @@ function dragonActivityMarkup(d){
 }
 function dragonCurrentMarkup(d){
   const current=d.current;
-  if(current)return '<div class="dragon-current is-busy"><span class="pulse-dot"></span><div><strong>Сейчас выполняет</strong><p>'+escapeHtml(current.title)+'</p></div></div>';
+  if(current)return '<div id="dragon-current" class="dragon-current is-busy"><span class="pulse-dot"></span><div><strong>Сейчас выполняет</strong><p>'+escapeHtml(current.title)+'</p></div></div>';
   const waiting=(d.tasks||[]).find(t=>['pending','suggested'].includes(t.status));
-  if(waiting)return '<div class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Следующая задача</strong><p>'+escapeHtml(waiting.title)+'</p></div></div>';
-  return '<div class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Сейчас свободна</strong><p>Ждёт новую задачу.</p></div></div>';
+  if(waiting)return '<div id="dragon-current" class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Следующая задача</strong><p>'+escapeHtml(waiting.title)+'</p></div></div>';
+  return '<div id="dragon-current" class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Сейчас свободна</strong><p>Ждёт новую задачу.</p></div></div>';
 }
 function dragonModeControl(d){
   const names={observe:'Наблюдать',suggest:'Предлагать',execute:'Выполнять'};
@@ -471,9 +471,11 @@ async function refreshDragonNotifications(){
     if(dragonDot){dragonDot.className='dragon-menu-status '+(d.current?'is-busy':(d.unread_notifications?'has-news':'is-idle'))}
     (d.notifications||[]).filter(n=>!n.is_read).slice(0,3).forEach(showDragonToast);
     if(page==='dragon'){
-      const active=document.activeElement;
-      const editing=active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName);
-      if(!editing&&dragonTab!=='project')render();
+      const current=document.getElementById('dragon-current');
+      if(current){const wrap=document.createElement('div');wrap.innerHTML=dragonCurrentMarkup(d);current.replaceWith(wrap.firstElementChild)}
+      const notes=document.getElementById('dragon-notifications');if(notes)notes.innerHTML=dragonNotificationsMarkup(d);
+      const actions=document.getElementById('dragon-actions');if(actions)actions.innerHTML=dragonActionsMarkup(d);
+      const tasks=document.getElementById('dragon-tasks');if(tasks)tasks.innerHTML=dragonTasksMarkup(d);
     }
   }catch(_error){}
 }
@@ -508,7 +510,7 @@ function render(){
     content.innerHTML=html;
     if(tab==='chat')scrollChat('chat-stream');
   }else if(page==='mobile')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">Позже</span><h2>Мобильное приложение</h2><p>Интерфейс уже адаптивный, но удалённое подключение пока отключено ради безопасности.</p></section>';
-  else if(page==='updates')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">GitHub → локально</span><h2>Система обновления</h2><p>Проверяет ветку main, сохраняет данные и переносимый Python, создаёт резервные копии и перезапускает TOORU после установки.</p><div class="form-actions"><button class="action" data-update-check>Проверить обновление</button><button class="primary" data-update-start>Обновить и перезапустить</button><button class="action" data-backup>Создать копию базы</button></div><div id="update-result" aria-live="polite"></div></section>';
+  else if(page==='updates')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">GitHub → локально</span><h2>Система обновления</h2><p>Текущая версия: <strong>'+escapeHtml(state.version)+'</strong>. Здесь видно, что изменилось и какие компоненты обновлены.</p><div class="form-actions"><button class="action" data-update-check>Проверить обновление</button><button class="primary" data-update-start>Обновить и перезапустить</button><button class="action" data-backup>Создать копию базы</button><button class="action" data-hard-reload>Обновить UI без кеша</button></div><div id="update-result" aria-live="polite"></div></section>'+releasePanel();
   else if(page==='diagnostics')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">Система</span><h2>Диагностика</h2><p>Проверка базы, Python, SQLite и подключения AI.</p><button class="primary" data-diagnose>Запустить проверку</button><div id="diagnostic-result" aria-live="polite"></div></section>';
 }
 function scrollChat(id){requestAnimationFrame(()=>{const el=document.getElementById(id);if(el)el.scrollTop=el.scrollHeight})}
