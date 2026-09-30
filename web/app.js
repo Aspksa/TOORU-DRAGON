@@ -88,7 +88,7 @@ function chatMessages(c){
     const role=x.role==='user'?'Ты':x.role==='tori'?'Тори':'Система';
     const side=x.role==='user'?'user':x.role==='tori'?'assistant':'system';
     const usage=(x.input_tokens||x.output_tokens)?`<span>${x.input_tokens||0} + ${x.output_tokens||0} ток.</span>`:'';
-    const context=(x.context||[]).length?`<div class="context-used"><span>Использовано:</span>${x.context.map(item=>`<button type="button" class="context-chip" data-context-kind="${escapeHtml(item.kind)}" data-context-id="${item.id}">${item.kind==='memory'?'Память':'Знание'} · ${escapeHtml(item.title)}</button>`).join('')}</div>`:'';
+    const context=(x.context||[]).length?`<div class="context-used"><span>Использовано:</span>${x.context.map(item=>`<span class="context-chip">${item.kind==='memory'?'Память':'Знание'} · ${escapeHtml(item.title)}</span>`).join('')}</div>`:'';
     return `<article class="chat-message ${side}"><div class="chat-author">${role}</div><div class="chat-bubble">${escapeHtml(x.text)}</div>${context}<div class="chat-meta">${escapeHtml(fmtDate(x.created_at))}${usage}</div></article>`;
   }).join('');
 }
