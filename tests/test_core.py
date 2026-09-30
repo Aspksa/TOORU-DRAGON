@@ -1049,7 +1049,7 @@ class CoreTest(unittest.TestCase):
     def test_dragon_ui_has_permissions_and_popup_notifications(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
         css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
-        self.assertIn('Права помощника', ui)
+        self.assertIn('<h2>Права</h2>', ui)
         self.assertIn('Читать весь рабочий проект', ui)
         self.assertIn('Изменять файлы проекта с резервной копией', ui)
         self.assertIn('Показывать всплывающие сообщения', ui)
