@@ -578,7 +578,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "Релиз 0.0.4 подготовлен; финальный Windows CI будет зафиксирован после PR.",
+    "current_change_tests": "0.0.4: Windows CI run 36686748593 — success; core, updater safety, project history и web/app.js syntax прошли.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
