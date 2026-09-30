@@ -679,7 +679,7 @@ class Storage:
             )
             settings = dict(db.execute(
                 "SELECT key,value FROM settings WHERE key IN "
-                "('learning_mode','ai_folder_id','ai_model','ai_last_success','secret.yandex_api_key')"
+                "('learning_mode','ai_folder_id','ai_model','ai_last_success','ai_auth_type','secret.yandex_api_key')"
             ).fetchall())
             queue = [dict(row) for row in db.execute(
                 'SELECT id,topic,question,status,attempts,substr(response_text,1,1200) AS response_text,'
@@ -697,6 +697,7 @@ class Storage:
             'configured': bool(settings.get('secret.yandex_api_key')),
             'folder_id': settings.get('ai_folder_id', DEFAULT_YANDEX_FOLDER),
             'model': settings.get('ai_model', DEFAULT_YANDEX_MODEL),
+            'auth_type': settings.get('ai_auth_type', 'api_key'),
             'last_success': float(settings.get('ai_last_success', '0') or 0),
             'queue': queue,
             'messages': self.ai_messages('learning', 120),
