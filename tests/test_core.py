@@ -1,5 +1,6 @@
 """Integration tests; use a temporary data directory, never the user's database."""
 import json
+import io
 from contextlib import closing
 from pathlib import Path
 import re
@@ -141,6 +142,34 @@ class CoreTest(unittest.TestCase):
         stale_task = next(x for x in self.request('/api/learning/status')['queue'] if x['id'] == stale['id'])
         self.assertEqual(stale_task['status'], 'stale')
         self.assertIn('Повторить', stale_task['last_error'])
+
+    def test_yandex_auth_type_selects_header_and_explains_401(self):
+        self.storage.save_ai_config({
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'iam-token-test',
+            'auth_type': 'iam_token',
+        })
+        with patch('app.urllib.request.urlopen',
+                   return_value=io.BytesIO(b'{"output_text":"OK","usage":{}}')) as call:
+            app.call_yandex_ai(self.storage, 'test')
+        request = call.call_args.args[0]
+        self.assertEqual(request.headers['Authorization'], 'Bearer iam-token-test')
+
+        self.storage.save_ai_config({
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'bad-api-key',
+            'auth_type': 'api_key',
+        })
+        error = urllib.error.HTTPError(
+            app.YANDEX_AI_URL, 401, 'Unauthorized', {},
+            io.BytesIO(b'{"error":{"message":"Unknown api key"}}')
+        )
+        with patch('app.urllib.request.urlopen', side_effect=error):
+            with self.assertRaisesRegex(ValueError, 'отклонила авторизацию'):
+                app.call_yandex_ai(self.storage, 'test')
+        self.assertEqual(self.storage.ai_config()['auth_type'], 'api_key')
 
     def test_ai_test_endpoint_uses_model_without_exposing_key(self):
         self.request('/api/ai/config', {
