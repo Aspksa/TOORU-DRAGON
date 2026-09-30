@@ -207,7 +207,7 @@ class CoreTest(unittest.TestCase):
     def test_schema_v3_learning_history_migrates_to_conversation(self):
         with tempfile.TemporaryDirectory(prefix='Тори v3 ') as temporary:
             path = Path(temporary) / 'tooru.sqlite3'
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db:
                 db.executescript("""
                     PRAGMA user_version=3;
                     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
