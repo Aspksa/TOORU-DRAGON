@@ -3,11 +3,22 @@ const token=document.querySelector('meta[name="tooru-token"]').content;
 const clientVersion=document.querySelector('meta[name="tooru-version"]')?.content||'';
 const clientAssets=document.querySelector('meta[name="tooru-assets"]')?.content||'';
 const content=document.getElementById('content');
-let state,page='main',tab='chat',dragonTab='overview';
+let state,page='main',tab='chat',dragonTab='overview',settingsTab='appearance';
+const shownDragonNotes=new Set();
+let messageTimer=null;
 const labels={main:'Главная',profile:'Личный кабинет',dragon:'Дракончик Тоору',ai:'Tooru/Ai',work:'Рабочие проекты',home:'Домашние проекты',mobile:'Мобильное приложение',settings:'Настройки',updates:'Система обновления',diagnostics:'Система диагностики'};
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtDate=value=>{try{return new Date(value).toLocaleString('ru-RU')}catch(_e){return ''}};
-function message(text){document.getElementById('message').textContent=text||''}
+function message(text,type='info'){
+  const status=document.getElementById('message');
+  if(status)status.textContent=text||'';
+  let host=document.getElementById('app-toast-host');
+  if(!host){host=document.createElement('div');host.id='app-toast-host';host.className='app-toast-host';document.body.appendChild(host)}
+  host.innerHTML='';
+  if(!text)return;
+  const el=document.createElement('div');el.className='app-toast type-'+type;el.textContent=text;host.appendChild(el);
+  clearTimeout(messageTimer);messageTimer=setTimeout(()=>{el.remove();if(status)status.textContent=''},4200);
+}
 function formatBytes(value){
   const bytes=Number(value)||0;
   if(!bytes)return '—';
@@ -16,16 +27,21 @@ function formatBytes(value){
   return (bytes/1048576).toFixed(2)+' МБ';
 }
 function updateStatusMarkup(u){
-  const stateText=!u.tracked?'Локальная сборка ещё не синхронизирована':u.update_available?'Есть обновление':'Установлена последняя ревизия';
   const installed=u.installed_revision?u.installed_revision.slice(0,12):'—';
-  const description=u.latest_description||'Описание не указано.';
-  let files='';
-  if(!u.files_available)files='<p class="hint">Список файлов появится после первой синхронизации локальной сборки.</p>';
-  else if(!(u.files||[]).length)files='<p class="hint">Изменённых файлов нет.</p>';
-  else files='<div class="update-files"><h3>Файлы обновления</h3><ul>'+u.files.map(file=>'<li><strong>'+escapeHtml(file.status_label||file.status)+'</strong> · <code>'+escapeHtml(file.path)+'</code>'+(file.will_update?'':' <span class="meta">не заменяется обновлятором</span>')+'</li>').join('')+'</ul></div>';
-  const last='<dl><dt>Версия</dt><dd>'+escapeHtml(u.version)+'</dd><dt>Установленная ревизия</dt><dd>'+escapeHtml(installed)+'</dd><dt>Ревизия на GitHub</dt><dd>'+escapeHtml(u.latest_revision.slice(0,12))+'</dd><dt>Состояние</dt><dd>'+escapeHtml(stateText)+'</dd><dt>Установлено</dt><dd>'+escapeHtml(u.installed_at?fmtDate(u.installed_at):'—')+'</dd><dt>Скачано в последний раз</dt><dd>'+escapeHtml(formatBytes(u.last_download_bytes))+'</dd><dt>Последняя системная копия</dt><dd>'+escapeHtml(u.last_backup||'—')+'</dd><dt>Название обновления</dt><dd>'+escapeHtml(u.latest_message||'—')+'</dd><dt>Описание</dt><dd>'+escapeHtml(description)+'</dd></dl>';
-  const history=(u.history||[]).length?'<div class="update-files"><h3>История обновлений</h3><ul>'+u.history.map(item=>'<li><strong>'+escapeHtml((item.revision||'').slice(0,12))+'</strong> · '+escapeHtml(item.installed_at?fmtDate(item.installed_at):'')+' · '+escapeHtml(formatBytes(item.download_bytes))+'<br><span>'+escapeHtml(item.title||'Без названия')+'</span></li>').join('')+'</ul></div>':'<p class="hint">История появится после следующего обновления.</p>';
-  return last+files+history;
+  const latest=u.latest_revision?u.latest_revision.slice(0,12):'—';
+  const changed=(u.files||[]).filter(x=>x.will_update).length;
+  const protectedCount=(u.files||[]).filter(x=>!x.will_update).length;
+  const stateText=!u.tracked?'Первичная синхронизация':u.update_available?'Доступно обновление':'Установлена последняя версия';
+  const tone=u.update_available?'warning':'success';
+  const files=!u.files_available?'<div class="empty-state compact">Список файлов появится после первой синхронизации.</div>':
+    !(u.files||[]).length?'<div class="empty-state compact">Изменённых файлов нет.</div>':
+    '<div class="update-file-list">'+u.files.map(file=>'<div class="update-file-row '+(file.will_update?'':'is-protected')+'"><span class="update-file-state">'+escapeHtml(file.status_label||file.status)+'</span><code>'+escapeHtml(file.path)+'</code><small>'+(file.will_update?'будет обновлён':'защищён')+'</small></div>').join('')+'</div>';
+  const history=(u.history||[]).length?'<div class="update-timeline">'+u.history.slice(0,8).map(item=>'<article><span class="timeline-dot"></span><div><strong>'+escapeHtml(item.title||'Обновление')+'</strong><small>'+escapeHtml((item.revision||'').slice(0,12))+' · '+escapeHtml(item.installed_at?fmtDate(item.installed_at):'')+' · '+escapeHtml(formatBytes(item.download_bytes))+'</small></div></article>').join('')+'</div>':'<div class="empty-state compact">История появится после первой установки обновления.</div>';
+  return '<div class="update-state-banner is-'+tone+'"><div><span class="eyebrow">Состояние</span><strong>'+escapeHtml(stateText)+'</strong><small>'+escapeHtml(u.latest_message||'GitHub main')+'</small></div><span class="update-state-icon">'+(u.update_available?'↓':'✓')+'</span></div>'+
+    '<div class="update-summary-grid"><div><span>Версия</span><strong>'+escapeHtml(u.version)+'</strong></div><div><span>Локально</span><strong>'+escapeHtml(installed)+'</strong></div><div><span>GitHub</span><strong>'+escapeHtml(latest)+'</strong></div><div><span>Изменится</span><strong>'+changed+'</strong></div><div><span>Защищено</span><strong>'+protectedCount+'</strong></div><div><span>Последняя установка</span><strong>'+escapeHtml(u.installed_at?fmtDate(u.installed_at):'—')+'</strong></div></div>'+
+    '<section class="update-detail-card"><div class="section-head"><div><span class="eyebrow">Изменения</span><h3>Файлы обновления</h3></div><span class="status-label">'+changed+'</span></div>'+files+'</section>'+
+    '<section class="update-detail-card"><span class="eyebrow">Описание</span><h3>'+escapeHtml(u.latest_message||'Без названия')+'</h3><p>'+escapeHtml(u.latest_description||'Описание обновления не указано.')+'</p><div class="update-meta-row"><span>Скачано ранее: '+escapeHtml(formatBytes(u.last_download_bytes))+'</span><span>Копия: '+escapeHtml(u.last_backup||'—')+'</span></div></section>'+
+    '<section class="update-detail-card"><span class="eyebrow">История</span><h3>Последние установки</h3>'+history+'</section>';
 }
 async function api(path,data){
   const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',cache:'no-store',headers:{'X-Tooru-Token':token,'Content-Type':'application/json','Cache-Control':'no-cache'},body:data===undefined?undefined:JSON.stringify(data)});
@@ -60,18 +76,14 @@ async function reload(){
   if(dragonDot){const d=state.dragon||{};dragonDot.className='dragon-menu-status '+(d.current?'is-busy':(d.unread_notifications?'has-news':'is-idle'));dragonDot.title=d.current?'Дракончик работает':d.unread_notifications?'Есть новые сообщения':'Дракончик свободна'}
 }
 function profilePanel(){
-  return `<div class="library-layout">
-    <form id="profile-form" class="panel clean-form">
-      <span class="eyebrow">Профиль</span><h2>Личный кабинет</h2>
-      <label for="name">Как к тебе обращаться</label>
-      <input id="name" name="name" maxlength="80" value="${escapeHtml(state.settings.name)}" required>
-      <button class="primary">Сохранить имя</button>
-    </form>
-    <section class="panel library-intro"><span class="eyebrow">Сводка</span><h2>Твоя TOORU</h2>
-      <p>Локальная память, проекты и обучение хранятся на этом устройстве.</p>
-      <div class="profile-stats"><span><strong>${state.counts.memory||0}</strong> память</span><span><strong>${state.counts.knowledge||0}</strong> знания</span><span><strong>${(state.counts.work||0)+(state.counts.home||0)}</strong> проекты</span></div>
-    </section>
-  </div>`;
+  const q=state.learning||{},d=state.dragon||{};
+  const projects=(state.counts.work||0)+(state.counts.home||0);
+  const tasks=(d.tasks||[]).filter(x=>['pending','suggested','running'].includes(x.status)).length;
+  const aiState=!q.configured?'Не настроен':state.ai_connected?'Подключён':'Ожидает проверки';
+  return '<section class="profile-hero"><div class="profile-avatar-large">'+escapeHtml((state.settings.name||'A').slice(0,1).toUpperCase())+'</div><div><span class="eyebrow">Личный кабинет</span><h2>'+escapeHtml(state.settings.name)+'</h2><p>Персональная сводка TOORU · DRAGON и быстрый доступ к главным функциям.</p><div class="profile-badges"><span class="status-label '+(state.ai_connected?'ok':'')+'">AI: '+escapeHtml(aiState)+'</span><span class="status-label">Версия '+escapeHtml(state.version)+'</span></div></div></section>'+
+  '<div class="profile-metrics"><article><span>Память</span><strong>'+(state.counts.memory||0)+'</strong><small>личных записей</small></article><article><span>Знания</span><strong>'+(state.counts.knowledge||0)+'</strong><small>материалов</small></article><article><span>Проекты</span><strong>'+projects+'</strong><small>дом + работа</small></article><article><span>Задачи Тоору</span><strong>'+tasks+'</strong><small>активных</small></article></div>'+
+  '<div class="profile-layout"><form id="profile-form" class="panel clean-form profile-card"><span class="eyebrow">Профиль</span><h2>Как к тебе обращаться</h2><label for="name">Имя</label><input id="name" name="name" maxlength="80" value="'+escapeHtml(state.settings.name)+'" required><button class="primary">Сохранить</button></form>'+
+  '<section class="panel profile-card"><span class="eyebrow">Быстрый доступ</span><h2>Продолжить работу</h2><div class="profile-actions"><button data-go="dragon"><span>🐉</span><strong>Дракончик Тоору</strong><small>задачи и действия</small></button><button data-go="ai" data-open-tab="chat"><span>✦</span><strong>Чат</strong><small>поговорить с помощником</small></button><button data-go="updates"><span>↓</span><strong>Обновления</strong><small>проверить новую версию</small></button><button data-go="settings"><span>⚙</span><strong>Настройки</strong><small>интерфейс и AI</small></button></div></section></div>';
 }
 function appearanceSettings(){
   return `<form id="appearance-form" class="panel clean-form">
@@ -114,6 +126,26 @@ function aiSettings(){
     </form>
   </section>`;
 
+}
+function settingsPanel(){
+  const tabs={appearance:'Интерфейс',ai:'AI',versions:'Версии'};
+  if(!tabs[settingsTab])settingsTab='appearance';
+  const nav='<div class="settings-tabs">'+Object.entries(tabs).map(([key,label])=>'<button class="'+(settingsTab===key?'is-active':'')+'" data-settings-tab="'+key+'">'+label+'</button>').join('')+'</div>';
+  const intro='<section class="settings-hero"><div><span class="eyebrow">Настройки</span><h2>Управление системой</h2><p>Основные параметры разделены по назначению — без длинной перегруженной страницы.</p></div><span class="status-label">TOORU '+escapeHtml(state.version)+'</span></section>';
+  const body=settingsTab==='appearance'?appearanceSettings():settingsTab==='ai'?aiSettings():releasePanel();
+  return intro+nav+'<div class="settings-focus">'+body+'</div>';
+}
+function updateCenterPanel(){
+  return '<section class="update-hero"><div><span class="eyebrow">GitHub → локально</span><h2>Центр обновления</h2><p>Проверка, резервная копия и установка новой версии в одном безопасном процессе.</p></div><span class="update-version-pill">v'+escapeHtml(state.version)+'</span></section>'+
+    '<div class="update-actions"><button class="primary" data-update-check><span>↻</span><strong>Проверить обновление</strong><small>сравнить с GitHub main</small></button><button class="action" data-update-start><span>↓</span><strong>Обновить и перезапустить</strong><small>с backup и откатом</small></button><button class="action" data-backup><span>▣</span><strong>Копия базы</strong><small>только SQLite</small></button><button class="action" data-hard-reload><span>⌁</span><strong>Обновить UI</strong><small>без кеша браузера</small></button></div>'+
+    '<div id="update-result" class="update-result" aria-live="polite"><div class="update-loading"><span class="spinner"></span><span>Проверяем состояние обновлений…</span></div></div>'+
+    releasePanel();
+}
+async function loadUpdateCenter(){
+  if(page!=='updates')return;
+  const el=document.getElementById('update-result');if(!el)return;
+  try{const u=await api('update/status');if(page==='updates'&&el.isConnected)el.innerHTML=updateStatusMarkup(u)}
+  catch(error){if(el.isConnected)el.innerHTML='<div class="update-state-banner is-error"><strong>Не удалось проверить GitHub</strong><small>'+escapeHtml(error.message)+'</small></div>'}
 }
 function recordList(kind,emptyText){
   const rows=state.records[kind]||[];
@@ -453,7 +485,8 @@ function ensureDragonToastHost(){
 }
 function showDragonToast(note){
   const host=ensureDragonToastHost();
-  if(host.querySelector('[data-dragon-note="'+note.id+'"]'))return;
+  if(shownDragonNotes.has(note.id)||host.querySelector('[data-dragon-note="'+note.id+'"]'))return;
+  shownDragonNotes.add(note.id);
   const el=document.createElement('div');
   el.className='dragon-toast level-'+escapeHtml(note.level||'info');
   el.dataset.dragonNote=String(note.id);
@@ -496,7 +529,7 @@ function render(){
   document.getElementById('description').textContent='';
   if(page==='main')content.innerHTML=mainPanel();
   else if(page==='profile'){content.innerHTML=profilePanel()}
-  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+releasePanel()+'</div>';content.querySelector('#theme').value=state.settings.theme;const auth=content.querySelector('#ai-auth');if(auth)auth.value=state.learning?.auth_type||'api_key'}
+  else if(page==='settings'){content.innerHTML=settingsPanel();const theme=content.querySelector('#theme');if(theme)theme.value=state.settings.theme;const auth=content.querySelector('#ai-auth');if(auth)auth.value=state.learning?.auth_type||'api_key'}
   else if(page==='dragon')content.innerHTML=dragonPanel()
   else if(page==='work')content.innerHTML=projectPanel('work','Рабочие проекты');
   else if(page==='home')content.innerHTML=projectPanel('home','Домашние проекты');
@@ -510,7 +543,7 @@ function render(){
     content.innerHTML=html;
     if(tab==='chat')scrollChat('chat-stream');
   }else if(page==='mobile')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">Позже</span><h2>Мобильное приложение</h2><p>Интерфейс уже адаптивный, но удалённое подключение пока отключено ради безопасности.</p></section>';
-  else if(page==='updates')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">GitHub → локально</span><h2>Система обновления</h2><p>Текущая версия: <strong>'+escapeHtml(state.version)+'</strong>. Здесь видно, что изменилось и какие компоненты обновлены.</p><div class="form-actions"><button class="action" data-update-check>Проверить обновление</button><button class="primary" data-update-start>Обновить и перезапустить</button><button class="action" data-backup>Создать копию базы</button><button class="action" data-hard-reload>Обновить UI без кеша</button></div><div id="update-result" aria-live="polite"></div></section>'+releasePanel();
+  else if(page==='updates'){content.innerHTML=updateCenterPanel();loadUpdateCenter();}
   else if(page==='diagnostics')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">Система</span><h2>Диагностика</h2><p>Проверка базы, Python, SQLite и подключения AI.</p><button class="primary" data-diagnose>Запустить проверку</button><div id="diagnostic-result" aria-live="polite"></div></section>';
 }
 function scrollChat(id){requestAnimationFrame(()=>{const el=document.getElementById(id);if(el)el.scrollTop=el.scrollHeight})}
@@ -522,6 +555,7 @@ content.addEventListener('click',async event=>{
   if(b.dataset.go){if(b.dataset.openTab)tab=b.dataset.openTab;go(b.dataset.go);return}
   if(b.dataset.tab){tab=b.dataset.tab;render();return}
   if(b.dataset.dragonTab){dragonTab=b.dataset.dragonTab;render();return}
+  if(b.dataset.settingsTab){settingsTab=b.dataset.settingsTab;render();return}
   if(b.hasAttribute('data-hard-reload')){hardReload();return}
   b.disabled=true;
   try{
@@ -540,7 +574,7 @@ content.addEventListener('click',async event=>{
     if(b.hasAttribute('data-dragon-mic')){const R=window.SpeechRecognition||window.webkitSpeechRecognition;if(!R){message('Распознавание речи не поддерживается этим браузером.')}else{const r=new R();r.lang='ru-RU';r.onresult=e=>{const input=document.querySelector('#dragon-task-form [name="title"]');if(input)input.value=e.results[0][0].transcript};r.onerror=()=>message('Не удалось распознать голос.');r.start()}}
     if(b.hasAttribute('data-dragon-read-all')){await api('dragon/notifications/read',{ids:null});await reload();render();message('Уведомления отмечены прочитанными.')}
     if(b.hasAttribute('data-ai-test')){const result=await api('ai/test',{});await reload();render();message('AI Studio отвечает: '+result.answer)}
-    if(b.hasAttribute('data-update-check')){const u=await api('update/status');const el=document.getElementById('update-result');if(el)el.innerHTML=updateStatusMarkup(u)}
+    if(b.hasAttribute('data-update-check')){const el=document.getElementById('update-result');if(el)el.innerHTML='<div class="update-loading"><span class="spinner"></span><span>Проверяем GitHub…</span></div>';const u=await api('update/status');if(el)el.innerHTML=updateStatusMarkup(u);message(u.update_available?'Найдено обновление.':'Установлена последняя версия.',u.update_available?'warning':'success')}
     if(b.hasAttribute('data-update-start')){if(!confirm('Обновить TOORU из GitHub и перезапустить программу?'))return;const u=await api('update/start',{});if(u.already_current){message('Уже установлена последняя ревизия GitHub.')}else{const el=document.getElementById('update-result');if(el)el.textContent='Обновление запущено. TOORU сейчас перезапустится.';message('Создана копия базы: data/backups/'+u.database_backup)}}
     if(b.hasAttribute('data-backup')){const result=await api('backup',{});message('Копия создана: data/backups/'+result.filename)}
     if(b.hasAttribute('data-diagnose')){const d=await api('diagnostics');const pairs=[['База',d.database==='ok'?'OK':d.database],['Python',d.python],['SQLite',d.sqlite],['AI',d.ai],['Модель',d.qwen],['Доступ',d.access]];const el=document.getElementById('diagnostic-result');if(el)el.innerHTML='<dl>'+pairs.map(([a,v])=>`<dt>${escapeHtml(a)}</dt><dd>${escapeHtml(v)}</dd>`).join('')+'</dl>'}
