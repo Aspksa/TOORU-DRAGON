@@ -1935,20 +1935,36 @@ class Storage:
             )
             return cursor.lastrowid
 
-    def dragon_notify(self, level, title, body='', action=''):
+    def dragon_notify(self, level, title, body='', action='', category='', group_key=''):
         if not self.dragon_permissions().get('notifications', True):
             return None
         if level not in {'info','success','warning','error'}:
             level = 'info'
+        if not category:
+            category = {'success':'completed','error':'error','warning':'decision'}.get(level, 'important')
+        if category not in {'important','completed','error','decision'}:
+            category = 'important'
+        group_key = str(group_key or action or category)[:160]
+        clean_title = str(title)[:300]
+        clean_body = str(body)[:2000]
         with self.connect() as db:
+            previous = db.execute(
+                'SELECT id,title,body FROM dragon_notifications '
+                'WHERE is_read=0 AND category=? AND group_key=? ORDER BY id DESC LIMIT 1',
+                (category, group_key)
+            ).fetchone()
+            if previous and previous['title'] == clean_title and previous['body'] == clean_body:
+                return previous['id']
             cursor = db.execute(
-                'INSERT INTO dragon_notifications(level,title,body,action) VALUES (?,?,?,?)',
-                (level, str(title)[:300], str(body)[:2000], str(action)[:120])
+                'INSERT INTO dragon_notifications(level,category,group_key,title,body,action) '
+                'VALUES (?,?,?,?,?,?)',
+                (level, category, group_key, clean_title, clean_body, str(action)[:120])
             )
             return cursor.lastrowid
 
     def dragon_notifications(self, unread_only=False, limit=30):
-        query = 'SELECT id,level,title,body,action,is_read,created_at FROM dragon_notifications'
+        query = ('SELECT id,level,category,group_key,title,body,action,is_read,created_at '
+                 'FROM dragon_notifications')
         params = []
         if unread_only:
             query += ' WHERE is_read=0'
@@ -2004,11 +2020,13 @@ class Storage:
                 (max(1, min(int(limit), 200)),)
             )]
         for row in rows:
-            for field in ('payload_json','result_json'):
+            for field, fallback in (('payload_json', {}), ('result_json', {}), ('plan_json', [])):
                 try:
-                    row[field[:-5]] = json.loads(row.pop(field) or '{}')
+                    parsed = json.loads(row.pop(field) or ('[]' if isinstance(fallback, list) else '{}'))
+                    row[field[:-5]] = parsed if isinstance(parsed, type(fallback)) else fallback
                 except (ValueError, TypeError):
-                    row[field[:-5]] = {}
+                    row[field[:-5]] = fallback
+            row['requires_decision'] = bool(row.get('requires_decision'))
         return rows
 
     def dragon_add_task(self, item):
