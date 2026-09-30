@@ -1044,8 +1044,8 @@ class Storage:
                 if duplicate:
                     continue
                 db.execute(
-                    "INSERT INTO brain_suggestions(kind,topic,question,reason,confidence) "
-                    "VALUES ('learning',?,?,?,?)",
+                    "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                    "VALUES ('learning','',?,?,?,?)",
                     (gap['topic'], gap['question'], gap.get('reason',''),
                      float(review.get('confidence', 0) or 0))
                 )
