@@ -68,14 +68,14 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 400)
 
     def test_release_001_version_and_cache_busted_assets(self):
-        self.assertEqual(app.VERSION, '0.0.2')
-        self.assertIn('meta name="tooru-version" content="0.0.2"', self.html)
+        self.assertEqual(app.VERSION, '0.0.3')
+        self.assertIn('meta name="tooru-version" content="0.0.3"', self.html)
         self.assertRegex(self.html, r'/app\.js\?v=[0-9a-f]{12}')
         self.assertRegex(self.html, r'/style\.css\?v=[0-9a-f]{12}')
         release = self.request('/api/release')
-        self.assertEqual(release['version'], '0.0.2')
+        self.assertEqual(release['version'], '0.0.3')
         self.assertEqual(len(release['asset_revision']), 12)
-        self.assertEqual(release['release']['components']['dragon']['version'], '0.0.2')
+        self.assertEqual(release['release']['components']['dragon']['version'], '0.0.3')
 
         request = urllib.request.Request(self.url + '/app.js?v=' + release['asset_revision'])
         with urllib.request.urlopen(request) as response:
@@ -115,7 +115,7 @@ class CoreTest(unittest.TestCase):
 
     def test_dragon_center_is_split_into_stable_internal_tabs(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
-        self.assertIn("const tabs={overview:'Обзор',tasks:'Задачи',project:'Проект',rights:'Права'}", ui)
+        self.assertIn("const tabs={overview:'Обзор',tasks:'Задачи',diary:'Дневник',project:'Проект',rights:'Права'}", ui)
         self.assertIn("data-dragon-tab=", ui)
         refresh_start = ui.index('async function refreshDragonNotifications')
         refresh_end = ui.index('function mainPanel', refresh_start)
@@ -125,11 +125,11 @@ class CoreTest(unittest.TestCase):
         self.assertIn("getElementById('dragon-tasks')", refresh)
         self.assertIn('Проводник проекта', ui)
 
-    def test_release_002_has_unified_profile_settings_and_updater_design(self):
+    def test_release_003_keeps_unified_profile_settings_and_updater_design(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
         css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
         release = json.loads((app.ROOT / 'RELEASE.json').read_text('utf-8'))
-        self.assertEqual(release['version'], '0.0.2')
+        self.assertEqual(release['version'], '0.0.3')
         for text_value in ('Персональная сводка TOORU', 'Задачи Тоору', 'Продолжить работу',
                            "appearance:'Интерфейс'", "ai:'AI'", "versions:'Версии'",
                            'Центр обновления', 'Проверяем состояние обновлений'):
@@ -142,6 +142,21 @@ class CoreTest(unittest.TestCase):
         self.assertIn('.settings-hero', css)
         self.assertIn('.update-hero', css)
         self.assertIn('.update-summary-grid', css)
+
+    def test_observable_dragon_ui_has_smart_events_diary_and_chat_links(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
+        for value in ('Умные уведомления','Дневник Дракончика','Ждёт твоего решения',
+                      'Связано с задачей Дракончика','Требуется решение',
+                      "diary:'Дневник'"):
+            self.assertIn(value, ui)
+        self.assertIn('notification-categories', ui)
+        self.assertIn('chat-linked-task', ui)
+        self.assertIn('dragon-task-plan', ui)
+        self.assertIn('.dragon-observer-orb', css)
+        self.assertIn('.dragon-event-strip', css)
+        self.assertIn('.dragon-diary', css)
+        self.assertIn('.chat-linked-task', css)
 
     def test_dragon_popup_is_deduplicated_per_browser_session(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
@@ -429,7 +444,7 @@ class CoreTest(unittest.TestCase):
         state = self.request('/api/state')
         self.assertEqual(state['reasoning']['items'][0]['problem'], 'Что развивать дальше в TOORU?')
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 10)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 11)
 
     def test_reasoning_engine_handles_invalid_model_json_without_hidden_trace(self):
         self.request('/api/ai/config', {
@@ -1035,9 +1050,9 @@ class CoreTest(unittest.TestCase):
             self.assertIn('роутер', messages[0]['text'])
             self.assertIn('пакеты', messages[1]['text'])
 
-    def test_schema_v10_has_brain_and_dragon_tables(self):
+    def test_schema_v11_has_brain_and_dragon_tables(self):
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 10)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 11)
             columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
         self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens','context_json'} <= columns)
         with self.storage.connect() as db:
@@ -1051,11 +1066,12 @@ class CoreTest(unittest.TestCase):
         with self.storage.connect() as db:
             notification_columns = {row[1] for row in db.execute('PRAGMA table_info(dragon_notifications)').fetchall()}
             action_columns = {row[1] for row in db.execute('PRAGMA table_info(dragon_actions)').fetchall()}
-        self.assertTrue({'level','title','body','action','is_read','created_at'} <= notification_columns)
+        self.assertTrue({'level','category','group_key','title','body','action','is_read','created_at'} <= notification_columns)
         self.assertTrue({'capability','target','summary','status','details_json','created_at'} <= action_columns)
         with self.storage.connect() as db:
             task_columns = {row[1] for row in db.execute('PRAGMA table_info(dragon_tasks)').fetchall()}
-        self.assertTrue({'title','action_type','payload_json','status','result_json','created_at','updated_at'} <= task_columns)
+        self.assertTrue({'title','action_type','payload_json','plan_json','status','result_json',
+                         'source_kind','source_message_id','requires_decision','created_at','updated_at'} <= task_columns)
 
     def test_dragon_permissions_notifications_and_project_access(self):
         status = self.request('/api/dragon/status')
@@ -1123,6 +1139,101 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(done['status'], 'done')
         backup = self.storage.directory / 'backups' / done['result']['filename']
         self.assertTrue(backup.exists())
+
+    def test_smart_notifications_are_categorized_grouped_and_counted(self):
+        first = self.storage.dragon_notify(
+            'warning', 'Нужно решение', 'Проверить план',
+            action='task', category='decision', group_key='task:42'
+        )
+        duplicate = self.storage.dragon_notify(
+            'warning', 'Нужно решение', 'Проверить план',
+            action='task', category='decision', group_key='task:42'
+        )
+        self.assertEqual(first, duplicate)
+        self.storage.dragon_notify(
+            'success', 'Готово', 'Проверка завершена',
+            action='task', category='completed', group_key='task:43'
+        )
+        status = self.storage.dragon_status()
+        self.assertEqual(status['unread_notification_counts']['decision'], 1)
+        self.assertEqual(status['unread_notification_counts']['completed'], 1)
+        note = next(x for x in status['notifications'] if x['id'] == first)
+        self.assertEqual(note['category'], 'decision')
+        self.assertEqual(note['group_key'], 'task:42')
+
+    def test_chat_command_creates_linked_dragon_task_with_plan(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        task_plan = {
+            'is_task': True,
+            'title': 'Проверить проект и подготовить исправления',
+            'action_type': 'project_scan',
+            'payload': {},
+            'requires_decision': True,
+            'plan': ['Проверить структуру проекта', 'Найти ошибки', 'Предложить исправления'],
+        }
+        with patch('app.call_yandex_ai', side_effect=[
+            {'text': 'Проверю проект и сначала покажу план.', 'input_tokens': 10, 'output_tokens': 5},
+            {'text': '{"suggestions":[]}', 'input_tokens': 3, 'output_tokens': 2},
+            {'text': json.dumps(task_plan, ensure_ascii=False), 'input_tokens': 8, 'output_tokens': 6},
+        ]) as call:
+            chat = self.request('/api/chat/send', {
+                'text': 'Проверь проект и исправь ошибки',
+                'use_context': True,
+            })
+        self.assertEqual([x.kwargs['purpose'] for x in call.call_args_list],
+                         ['chat','reflection','planning'])
+        user_message = chat['messages'][-2]
+        status = self.storage.dragon_status()
+        task = status['tasks'][0]
+        self.assertEqual(task['source_kind'], 'chat')
+        self.assertEqual(task['source_message_id'], user_message['id'])
+        self.assertTrue(task['requires_decision'])
+        self.assertEqual(task['status'], 'suggested')
+        self.assertEqual(len(task['plan']), 3)
+        self.assertEqual(status['unread_notification_counts']['decision'], 1)
+
+    def test_decision_task_never_background_executes_until_user_runs_it(self):
+        self.request('/api/dragon/mode', {'mode': 'execute'})
+        task = self.storage.dragon_add_task({
+            'title': 'Исправить проект после проверки',
+            'action_type': 'project_scan',
+            'payload': {},
+            'plan': ['Проверить', 'Предложить исправления'],
+            'requires_decision': True,
+            'source_kind': 'chat',
+            'source_message_id': 123,
+        })
+        self.assertEqual(task['status'], 'suggested')
+        self.assertIsNone(self.storage.run_next_dragon_task())
+        status = self.storage.dragon_status()
+        queued = next(x for x in status['tasks'] if x['id'] == task['id'])
+        self.assertEqual(queued['status'], 'suggested')
+        status = self.request('/api/dragon/task/action', {'id': task['id'], 'action': 'run'})
+        done = next(x for x in status['tasks'] if x['id'] == task['id'])
+        self.assertEqual(done['status'], 'done')
+
+    def test_dragon_diary_collects_actions_learning_and_goals(self):
+        self.storage.dragon_log_action('test', 'project', 'Проверен проект', {'ok': True})
+        with self.storage.connect() as db:
+            db.execute(
+                "INSERT INTO learning_queue(topic,question,status,response_text,review_json) "
+                "VALUES ('UI','Как улучшить дизайн?','done','Ответ',?)",
+                (json.dumps({'summary':'Изучен дизайн интерфейса'}, ensure_ascii=False),)
+            )
+            db.execute(
+                "INSERT INTO brain_goals(title,description,status,plan_json,progress_json) "
+                "VALUES ('Улучшить Тоору','','active','[]',?)",
+                (json.dumps({'summary':'Цель продвинулась'}, ensure_ascii=False),)
+            )
+        diary = self.storage.dragon_diary(14)
+        titles = [event['title'] for day in diary for event in day['events']]
+        self.assertTrue(any('Проверен проект' in title for title in titles))
+        self.assertTrue(any('Изучено: UI' in title for title in titles))
+        self.assertTrue(any('Цель: Улучшить Тоору' in title for title in titles))
 
     def test_dragon_project_write_is_guarded_and_backed_up(self):
         target = app.ROOT / 'web' / 'dragon-test.txt'
