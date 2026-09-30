@@ -61,7 +61,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 11:
+            if version > 12:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -138,6 +138,34 @@ class Storage:
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 CREATE INDEX IF NOT EXISTS brain_reasoning_id ON brain_reasoning(id DESC);
+                CREATE TABLE IF NOT EXISTS work_context (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    area TEXT NOT NULL DEFAULT '',
+                    active_task TEXT NOT NULL DEFAULT '',
+                    last_decision TEXT NOT NULL DEFAULT '',
+                    next_step TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE TABLE IF NOT EXISTS brain_experiments (
+                    id INTEGER PRIMARY KEY,
+                    hypothesis TEXT NOT NULL,
+                    experiment_type TEXT NOT NULL DEFAULT 'knowledge_check',
+                    plan TEXT NOT NULL DEFAULT '',
+                    expected_result TEXT NOT NULL DEFAULT '',
+                    actual_result TEXT NOT NULL DEFAULT '',
+                    verdict TEXT NOT NULL DEFAULT 'planned',
+                    confidence_before REAL NOT NULL DEFAULT 0,
+                    confidence_after REAL NOT NULL DEFAULT 0,
+                    lesson TEXT NOT NULL DEFAULT '',
+                    reasoning_id INTEGER,
+                    auto_allowed INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS brain_experiments_status_id
+                    ON brain_experiments(status, id DESC);
                 CREATE TABLE IF NOT EXISTS dragon_notifications (
                     id INTEGER PRIMARY KEY,
                     level TEXT NOT NULL DEFAULT 'info',
@@ -342,6 +370,42 @@ class Storage:
                 if 'requires_decision' not in task_columns:
                     db.execute("ALTER TABLE dragon_tasks ADD COLUMN requires_decision INTEGER NOT NULL DEFAULT 0")
                 db.execute('PRAGMA user_version=11')
+            if version < 12:
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS work_context (
+                        id INTEGER PRIMARY KEY CHECK (id=1),
+                        area TEXT NOT NULL DEFAULT '',
+                        active_task TEXT NOT NULL DEFAULT '',
+                        last_decision TEXT NOT NULL DEFAULT '',
+                        next_step TEXT NOT NULL DEFAULT '',
+                        source TEXT NOT NULL DEFAULT 'manual',
+                        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE TABLE IF NOT EXISTS brain_experiments (
+                        id INTEGER PRIMARY KEY,
+                        hypothesis TEXT NOT NULL,
+                        experiment_type TEXT NOT NULL DEFAULT 'knowledge_check',
+                        plan TEXT NOT NULL DEFAULT '',
+                        expected_result TEXT NOT NULL DEFAULT '',
+                        actual_result TEXT NOT NULL DEFAULT '',
+                        verdict TEXT NOT NULL DEFAULT 'planned',
+                        confidence_before REAL NOT NULL DEFAULT 0,
+                        confidence_after REAL NOT NULL DEFAULT 0,
+                        lesson TEXT NOT NULL DEFAULT '',
+                        reasoning_id INTEGER,
+                        status TEXT NOT NULL DEFAULT 'planned',
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS brain_experiments_status_id
+                        ON brain_experiments(status, id DESC);
+                """)
+                experiment_columns = {row['name'] for row in db.execute(
+                    'PRAGMA table_info(brain_experiments)'
+                ).fetchall()}
+                if 'auto_allowed' not in experiment_columns:
+                    db.execute("ALTER TABLE brain_experiments ADD COLUMN auto_allowed INTEGER NOT NULL DEFAULT 0")
+                db.execute('PRAGMA user_version=12')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
@@ -366,8 +430,20 @@ class Storage:
                 ('dragon_notifications', '1'),
                 ('dragon_delete_files', '0'),
                 ('dragon_mode', 'suggest'),
+                ('brain_experiment_daily_limit', '3'),
+                ('brain_experiment_day', ''),
+                ('brain_experiment_count', '0'),
             ):
                 db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', (key, value))
+            db.execute(
+                "INSERT OR IGNORE INTO work_context(id,area,active_task,last_decision,next_step,source) "
+                "VALUES (1,?,?,?,?,?)",
+                ('TOORU · DRAGON / развитие Дракончика',
+                 'Связать чат, задачи, Разум и проверку результата',
+                 'Широкие изменения требуют подтверждения',
+                 'Проверять гипотезы безопасными экспериментами',
+                 'system')
+            )
 
     @contextmanager
     def connect(self):
@@ -392,10 +468,12 @@ class Storage:
         chat = self.chat_state()
         reasoning = self.reasoning_state()
         dragon = self.dragon_status()
+        brain_lab = self.brain_lab_state()
         return dict(version=VERSION, release=release_manifest(), asset_revision=web_asset_revision(),
                     settings=settings, counts=counts, records=records,
                     ai_connected=learning['configured'] and learning['last_success'] > 0,
-                    learning=learning, chat=chat, reasoning=reasoning, dragon=dragon)
+                    learning=learning, chat=chat, reasoning=reasoning, dragon=dragon,
+                    brain_lab=brain_lab)
 
     def add(self, item):
         kind, title = item.get('kind'), item.get('title', '')
@@ -665,6 +743,316 @@ class Storage:
                 return {}
         return data if isinstance(data, dict) else {}
 
+    def work_context(self):
+        with self.connect() as db:
+            row = db.execute(
+                'SELECT area,active_task,last_decision,next_step,source,updated_at '
+                'FROM work_context WHERE id=1'
+            ).fetchone()
+        if not row:
+            return {
+                'area':'','active_task':'','last_decision':'','next_step':'',
+                'source':'system','updated_at':''
+            }
+        return dict(row)
+
+    def save_work_context(self, item, source='manual'):
+        current = self.work_context()
+        fields = {}
+        for key, limit in (
+            ('area', 500), ('active_task', 1000),
+            ('last_decision', 1200), ('next_step', 1200)
+        ):
+            value = item[key] if key in item else current.get(key, '')
+            if not isinstance(value, str):
+                raise ValueError('Рабочий контекст должен быть текстом.')
+            fields[key] = value.strip()[:limit]
+        if not any(fields.values()):
+            raise ValueError('Заполни хотя бы одно поле рабочего контекста.')
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO work_context(id,area,active_task,last_decision,next_step,source,updated_at) "
+                "VALUES (1,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%SZ','now')) "
+                "ON CONFLICT(id) DO UPDATE SET area=excluded.area,active_task=excluded.active_task,"
+                "last_decision=excluded.last_decision,next_step=excluded.next_step,"
+                "source=excluded.source,updated_at=excluded.updated_at",
+                (fields['area'], fields['active_task'], fields['last_decision'],
+                 fields['next_step'], str(source)[:80])
+            )
+        self.dragon_log_action(
+            'work_context', 'brain', 'Обновлён рабочий контекст',
+            {'area': fields['area'], 'active_task': fields['active_task'],
+             'next_step': fields['next_step']}
+        )
+        return self.work_context()
+
+    def _work_context_text(self):
+        ctx = self.work_context()
+        values = [
+            ('Сейчас мы работаем над', ctx.get('area')),
+            ('Активная задача', ctx.get('active_task')),
+            ('Последнее решение', ctx.get('last_decision')),
+            ('Следующий шаг', ctx.get('next_step')),
+        ]
+        lines = [f'{label}: {value}' for label, value in values if value]
+        return '\n'.join(lines)
+
+    def brain_experiments(self, limit=30):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                'SELECT id,hypothesis,experiment_type,plan,expected_result,actual_result,verdict,'
+                'confidence_before,confidence_after,lesson,reasoning_id,auto_allowed,status,created_at,updated_at '
+                'FROM brain_experiments ORDER BY id DESC LIMIT ?',
+                (max(1, min(int(limit), 100)),)
+            )]
+
+    def create_brain_experiment(self, item):
+        hypothesis = item.get('hypothesis', '')
+        experiment_type = item.get('experiment_type', 'knowledge_check')
+        plan = item.get('plan', '')
+        expected = item.get('expected_result', '')
+        reasoning_id = item.get('reasoning_id')
+        auto_allowed = item.get('auto_allowed') is True
+        try:
+            confidence = max(0.0, min(float(item.get('confidence_before', 0.5)), 1.0))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        if not isinstance(hypothesis, str) or not 3 <= len(hypothesis.strip()) <= 3000:
+            raise ValueError('Гипотеза должна содержать от 3 до 3000 символов.')
+        if experiment_type not in {'knowledge_check','project_scan'}:
+            raise ValueError('Неизвестный безопасный тип эксперимента.')
+        if not isinstance(plan, str) or not isinstance(expected, str):
+            raise ValueError('План и ожидаемый результат должны быть текстом.')
+        if type(reasoning_id) is not int:
+            reasoning_id = None
+        with self.connect() as db:
+            duplicate = db.execute(
+                "SELECT id FROM brain_experiments WHERE status IN ('planned','running') "
+                "AND lower(hypothesis)=lower(?) LIMIT 1",
+                (hypothesis.strip(),)
+            ).fetchone()
+            if duplicate:
+                return {'id': duplicate['id'], 'status': 'planned', 'duplicate': True}
+            cursor = db.execute(
+                'INSERT INTO brain_experiments('
+                'hypothesis,experiment_type,plan,expected_result,confidence_before,reasoning_id,auto_allowed'
+                ') VALUES (?,?,?,?,?,?,?)',
+                (hypothesis.strip()[:3000], experiment_type, plan.strip()[:4000],
+                 expected.strip()[:3000], confidence, reasoning_id, 1 if auto_allowed else 0)
+            )
+            experiment_id = cursor.lastrowid
+        self.dragon_log_action(
+            'experiment', str(experiment_id), 'Запланирован эксперимент Разума',
+            {'hypothesis': hypothesis.strip()[:500], 'type': experiment_type}
+        )
+        return {'id': experiment_id, 'status': 'planned'}
+
+    def run_brain_experiment(self, experiment_id=None):
+        with self.connect() as db:
+            if experiment_id is None:
+                row = db.execute(
+                    "SELECT * FROM brain_experiments WHERE status='planned' ORDER BY id LIMIT 1"
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT * FROM brain_experiments WHERE id=? AND status IN ('planned','error')",
+                    (experiment_id,)
+                ).fetchone()
+            if not row:
+                return None
+            row = dict(row)
+            db.execute(
+                "UPDATE brain_experiments SET status='running',"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (row['id'],)
+            )
+        try:
+            evidence = ''
+            if row['experiment_type'] == 'project_scan':
+                files = self.dragon_project_tree(800)
+                hypothesis_text = (
+                    row['hypothesis'] + ' ' + row['plan'] + ' ' + row['expected_result']
+                ).lower()
+                terms = {
+                    token for token in re.findall(r'[a-zа-яё0-9_.-]{3,}', hypothesis_text, re.I)
+                    if token not in {'что','это','для','как','или','при','над','под','проверить','результат'}
+                }
+                text_ext = {'.py','.js','.css','.html','.md','.json','.jsonl','.bat','.yml','.yaml','.txt'}
+                ranked = []
+                for item in files:
+                    path = item['path']
+                    suffix = Path(path).suffix.lower()
+                    if suffix not in text_ext or int(item.get('size', 0)) > 180000:
+                        continue
+                    low = path.lower()
+                    score = sum(3 if term in low else 0 for term in terms)
+                    if any(key in low for key in ('app.py','web/app.js','web/style.css','agents.md','release.json')):
+                        score += 1
+                    ranked.append((score, path))
+                ranked.sort(key=lambda pair: (-pair[0], pair[1]))
+                chosen = [path for _, path in ranked[:5]]
+                blocks = []
+                char_budget = 24000
+                for path in chosen:
+                    try:
+                        payload = self.dragon_read_project_file(path)
+                    except ValueError:
+                        continue
+                    snippet = payload['text'][:min(7000, char_budget)]
+                    char_budget -= len(snippet)
+                    blocks.append(f"Файл {path}:\n{snippet}")
+                    if char_budget <= 0:
+                        break
+                evidence = (
+                    f"Проект содержит {len(files)} доступных файлов. "
+                    f"Для проверки выбраны {len(blocks)} релевантных файлов.\n\n"
+                    + ('\n\n---\n\n'.join(blocks) if blocks else
+                       'Подходящих текстовых файлов для безопасного чтения не найдено.')
+                )
+            else:
+                ctx = self.relevant_context(row['hypothesis'], limit=6, char_budget=7000)
+                if ctx:
+                    evidence = '\n\n'.join(
+                        f"{entry['kind']}: {entry['title']}\n{entry['excerpt']}" for entry in ctx
+                    )
+            work = self._work_context_text()
+            prompt = (
+                'Ты — проверяющий модуль Лаборатории Разума. Не показывай скрытую цепочку рассуждений. '
+                'Проверь гипотезу только по доступным данным и верни JSON: '
+                '{"verdict":"confirmed|refuted|inconclusive","actual_result":"...",'
+                '"confidence_after":0.0,"lesson":"..."}. '
+                'confirmed — только если данных достаточно. refuted — если есть конкретное противоречие. '
+                'Иначе inconclusive. lesson должен быть коротким проверяемым правилом, а не догадкой.\n\n'
+                f"Рабочий контекст:\n{work or 'не задан'}\n\n"
+                f"Гипотеза:\n{row['hypothesis']}\n\n"
+                f"План эксперимента:\n{row['plan']}\n\n"
+                f"Ожидаемый результат:\n{row['expected_result']}\n\n"
+                f"Доступные данные:\n{evidence or 'нет дополнительных данных'}"
+            )
+            result = call_yandex_ai(
+                self, prompt, max_output_tokens=850, purpose='critic'
+            )
+            data = self._parse_json_object(result['text'])
+            verdict = data.get('verdict')
+            if verdict not in {'confirmed','refuted','inconclusive'}:
+                verdict = 'inconclusive'
+            actual = str(data.get('actual_result') or '').strip()[:5000]
+            lesson = str(data.get('lesson') or '').strip()[:3000]
+            try:
+                after = max(0.0, min(float(data.get('confidence_after', row['confidence_before'])), 1.0))
+            except (TypeError, ValueError):
+                after = float(row['confidence_before'] or 0)
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE brain_experiments SET status='done',actual_result=?,verdict=?,"
+                    "confidence_after=?,lesson=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                    "WHERE id=?",
+                    (actual, verdict, after, lesson, row['id'])
+                )
+                if lesson and verdict in {'confirmed','refuted'} and after >= 0.8:
+                    title = ('Проверено' if verdict == 'confirmed' else 'Опровергнуто') +                             ' · ' + row['hypothesis'][:180]
+                    exists = db.execute(
+                        "SELECT 1 FROM records WHERE kind='knowledge' AND lower(title)=lower(?) LIMIT 1",
+                        (title,)
+                    ).fetchone()
+                    if not exists:
+                        db.execute(
+                            'INSERT INTO records(kind,title,body,source) VALUES (?,?,?,?)',
+                            ('knowledge', title, lesson[:20000], 'Лаборатория Разума · эксперимент')
+                        )
+            self.add_ai_message(
+                'brain', 'system', 'Эксперимент Разума: ' + verdict,
+                input_tokens=result['input_tokens'], output_tokens=result['output_tokens']
+            )
+            self.mark_ai_success()
+            self.dragon_log_action(
+                'experiment', str(row['id']), 'Эксперимент Разума завершён',
+                {'verdict': verdict, 'lesson': lesson[:500], 'confidence_after': after}
+            )
+            self.save_work_context({
+                'last_decision': (
+                    ('Гипотеза подтверждена: ' if verdict == 'confirmed' else
+                     'Гипотеза опровергнута: ' if verdict == 'refuted' else
+                     'Гипотеза пока не доказана: ') + row['hypothesis'][:900]
+                ),
+                'next_step': lesson or 'Нужны дополнительные данные для следующей проверки.',
+            }, source='experiment')
+            if verdict == 'refuted':
+                self.dragon_notify(
+                    'warning', 'Гипотеза опровергнута', row['hypothesis'][:300],
+                    action='experiment', category='important',
+                    group_key='experiment:' + str(row['id'])
+                )
+            return {'id': row['id'], 'status': 'done', 'verdict': verdict}
+        except Exception as exc:
+            error_text = str(exc)[:3000]
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE brain_experiments SET status='error',actual_result=?,"
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (error_text, row['id'])
+                )
+            self.dragon_log_action(
+                'experiment', str(row['id']), 'Эксперимент Разума завершился ошибкой',
+                {'error': error_text, 'hypothesis': row['hypothesis'][:500]}, status='error'
+            )
+            self.dragon_notify(
+                'error', 'Ошибка эксперимента', row['hypothesis'][:300],
+                action='experiment', category='error',
+                group_key='experiment:' + str(row['id'])
+            )
+            self.save_work_context({
+                'last_decision': 'Эксперимент не дал результата из-за ошибки: ' + error_text[:900],
+                'next_step': 'Исправить причину ошибки эксперимента и повторить проверку.',
+            }, source='experiment_error')
+            logging.warning('Brain experiment %s failed: %s', row['id'], exc)
+            return {'id': row['id'], 'status': 'error', 'error': str(exc)}
+
+    def promote_autonomous_experiment(self):
+        if self.usage_summary().get('blocked'):
+            return None
+        today = time.strftime('%Y-%m-%d', time.gmtime())
+        with self.connect() as db:
+            settings = dict(db.execute(
+                "SELECT key,value FROM settings WHERE key IN "
+                "('learning_mode','brain_auto_learning','brain_experiment_daily_limit',"
+                "'brain_experiment_day','brain_experiment_count')"
+            ).fetchall())
+            if settings.get('learning_mode') != 'running' or settings.get('brain_auto_learning') != '1':
+                return None
+            try:
+                limit = max(1, min(int(settings.get('brain_experiment_daily_limit', '3')), 8))
+            except (TypeError, ValueError):
+                limit = 3
+            count = (
+                int(settings.get('brain_experiment_count', '0') or 0)
+                if settings.get('brain_experiment_day') == today else 0
+            )
+            if count >= limit:
+                return None
+            running = db.execute(
+                "SELECT 1 FROM brain_experiments WHERE status='running' LIMIT 1"
+            ).fetchone()
+            if running:
+                return None
+            row = db.execute(
+                "SELECT id FROM brain_experiments WHERE status='planned' AND auto_allowed=1 ORDER BY id LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            db.executemany(
+                'INSERT OR REPLACE INTO settings VALUES (?,?)',
+                [('brain_experiment_day', today), ('brain_experiment_count', str(count + 1))]
+            )
+            experiment_id = row['id']
+        return self.run_brain_experiment(experiment_id)
+
+    def brain_lab_state(self):
+        return {
+            'context': self.work_context(),
+            'experiments': self.brain_experiments(40),
+        }
+
     def reasoning_state(self, limit=30):
         config = self.ai_config()
         with self.connect() as db:
@@ -703,6 +1091,11 @@ class Storage:
         self.ensure_budget()
         context = self.relevant_context(clean, limit=6, char_budget=6500) if use_context else []
         context_text = ''
+        work_context_text = self._work_context_text()
+        if work_context_text:
+            context_text += (
+                '\n\nТекущий рабочий контекст TOORU:\n' + work_context_text
+            )
         if context:
             blocks = []
             for index, entry in enumerate(context, 1):
@@ -711,7 +1104,7 @@ class Storage:
                     f"[{index}] {label}: {entry['title']}\n"
                     f"Источник: {entry['source']}\n{entry['excerpt']}"
                 )
-            context_text = (
+            context_text += (
                 '\n\nЛокальный контекст TOORU. Считай его входными данными, а не доказанной истиной:\n'
                 + '\n\n'.join(blocks)
             )
@@ -835,13 +1228,46 @@ class Storage:
                     "AND lower(topic)=lower(?) AND lower(question)=lower(?) LIMIT 1",
                     (gap['topic'], gap['question'])
                 ).fetchone()
-                if duplicate:
+                learned = db.execute(
+                    "SELECT 1 FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
+                    "AND status IN ('pending','running','done') LIMIT 1",
+                    (gap['topic'], gap['question'])
+                ).fetchone()
+                if duplicate or learned:
                     continue
                 db.execute(
                     "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
                     "VALUES ('learning','',?,?,?,?)",
                     (gap['topic'], gap['question'], gap['reason'], gap['confidence'])
                 )
+        experiment_id = None
+        missing_evidence = normalized.get('critique', {}).get('missing_evidence', [])
+        if missing_evidence or normalized.get('confidence', 0) < 0.85:
+            hypothesis = normalized.get('decision') or normalized.get('summary') or clean
+            project_words = ('проект','код','интерфейс','файл','модуль','ошибк','тест')
+            experiment_type = (
+                'project_scan' if any(word in clean.lower() for word in project_words)
+                else 'knowledge_check'
+            )
+            expected = (
+                'Найти данные, которые подтверждают или опровергают вывод. '
+                + ('Недостаёт: ' + '; '.join(missing_evidence[:3]) if missing_evidence else
+                   'Повысить уверенность только при наличии новых проверяемых данных.')
+            )
+            created = self.create_brain_experiment({
+                'hypothesis': hypothesis,
+                'experiment_type': experiment_type,
+                'plan': normalized.get('next_step') or 'Провести минимальную безопасную проверку.',
+                'expected_result': expected,
+                'confidence_before': normalized.get('confidence', 0),
+                'reasoning_id': reasoning_id,
+                'auto_allowed': True,
+            })
+            experiment_id = created.get('id')
+        self.save_work_context({
+            'last_decision': normalized.get('decision') or normalized.get('summary') or clean,
+            'next_step': normalized.get('next_step') or 'Проверить результат Разума.',
+        }, source='reasoning')
         self.add_ai_message(
             'brain', 'system', 'Разум v2: анализ + критическая проверка',
             input_tokens=total_input, output_tokens=total_output
@@ -849,6 +1275,7 @@ class Storage:
         self.mark_ai_success()
         state = self.reasoning_state()
         state['created_id'] = reasoning_id
+        state['experiment_id'] = experiment_id
         return state
 
     def brain_goals(self, status='active', limit=20):
@@ -1066,6 +1493,14 @@ class Storage:
                     ).fetchone()
                     if exists:
                         continue
+                if kind == 'learning':
+                    learned = db.execute(
+                        "SELECT 1 FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
+                        "AND status IN ('pending','running','done') LIMIT 1",
+                        (topic, question)
+                    ).fetchone()
+                    if learned:
+                        continue
                 cursor = db.execute(
                     'INSERT INTO brain_suggestions(kind,title,body,topic,question,reason,confidence,source_message_id) '
                     'VALUES (?,?,?,?,?,?,?,?)',
@@ -1276,6 +1711,12 @@ class Storage:
 
         context = self.relevant_context(clean) if use_context else []
         sections = []
+        work_context = self._work_context_text()
+        if work_context:
+            sections.append(
+                'Текущий рабочий контекст TOORU. Используй его как ориентацию текущей работы, '
+                'но не считай автоматически доказанным фактом:\n' + work_context
+            )
         if transcript:
             sections.append('Недавняя история диалога:\n' + '\n\n'.join(transcript[-10:]))
         if context:
@@ -1353,7 +1794,8 @@ class Storage:
             settings = dict(db.execute(
                 "SELECT key,value FROM settings WHERE key IN "
                 "('learning_mode','ai_folder_id','ai_model','ai_last_success','ai_auth_type','secret.yandex_api_key',"
-                "'brain_auto_learning','brain_auto_min_confidence','brain_auto_daily_limit','brain_auto_chain_limit','brain_auto_day','brain_auto_count')"
+                "'brain_auto_learning','brain_auto_min_confidence','brain_auto_daily_limit','brain_auto_chain_limit','brain_auto_day','brain_auto_count',"
+                "'brain_experiment_daily_limit','brain_experiment_day','brain_experiment_count')"
             ).fetchall())
             queue = [dict(row) for row in db.execute(
                 'SELECT id,topic,question,status,attempts,substr(response_text,1,1200) AS response_text,'
@@ -1395,6 +1837,12 @@ class Storage:
                 'today_count': (
                     int(settings.get('brain_auto_count', '0') or 0)
                     if settings.get('brain_auto_day', '') == time.strftime('%Y-%m-%d', time.gmtime())
+                    else 0
+                ),
+                'experiment_daily_limit': int(settings.get('brain_experiment_daily_limit', '3') or 3),
+                'experiment_today_count': (
+                    int(settings.get('brain_experiment_count', '0') or 0)
+                    if settings.get('brain_experiment_day', '') == time.strftime('%Y-%m-%d', time.gmtime())
                     else 0
                 ),
             },
@@ -1593,13 +2041,21 @@ class Storage:
         clean_topic = topic.strip()
         clean_question = question.strip()
         with self.connect() as db:
+            duplicate = db.execute(
+                "SELECT id,status FROM learning_queue WHERE lower(topic)=lower(?) "
+                "AND lower(question)=lower(?) AND status IN ('pending','running','done') "
+                "ORDER BY id DESC LIMIT 1",
+                (clean_topic, clean_question)
+            ).fetchone()
+            if duplicate:
+                return {'id': duplicate['id'], 'status': duplicate['status'], 'duplicate': True}
             cursor = db.execute(
                 'INSERT INTO learning_queue(topic,question) VALUES (?,?)',
                 (clean_topic, clean_question)
             )
             queue_id = cursor.lastrowid
         self.add_ai_message('learning', 'tori', clean_question, queue_id=queue_id)
-        return {'id': queue_id}
+        return {'id': queue_id, 'status': 'pending', 'duplicate': False}
 
     def learning_action(self, item):
         queue_id = item.get('id')
@@ -1916,6 +2372,17 @@ class Storage:
         self.mark_ai_success()
         if review:
             self.create_review_suggestions(review)
+            summary = str(review.get('summary') or '').strip()
+            verdict = str(review.get('verdict') or '')
+            if summary:
+                self.save_work_context({
+                    'last_decision': 'Результат обучения: ' + summary[:1000],
+                    'next_step': (
+                        'Применить подтверждённое знание к активной задаче.'
+                        if verdict == 'good'
+                        else 'Проверить пробелы из самопроверки перед применением.'
+                    ),
+                }, source='learning')
         goal_id = self.finish_goal_learning(queue_id)
         self.enforce_learning_budget()
         return {'ok': True, 'goal_id': goal_id}
@@ -2217,6 +2684,10 @@ class Storage:
                    'source_kind': source_kind, 'requires_decision': requires_decision,
                    'plan_steps': len(normalized_plan)}
         self.dragon_log_action('task', str(task_id), 'Создана задача Дракончика', details)
+        context_update = {'active_task': title.strip()}
+        if normalized_plan:
+            context_update['next_step'] = normalized_plan[0]['title']
+        self.save_work_context(context_update, source='dragon_task')
         if requires_decision:
             self.dragon_notify(
                 'warning', 'Требуется решение', title.strip(),
@@ -2536,12 +3007,23 @@ class LearningWorker(threading.Thread):
                 self.storage.promote_autonomous_learning()
             except Exception as exc:
                 logging.warning('Brain automation cycle failed: %s', exc)
+            try:
+                self.storage.promote_autonomous_experiment()
+            except Exception as exc:
+                logging.warning('Brain experiment cycle failed: %s', exc)
             item = self.storage.claim_learning()
             if not item:
                 continue
             try:
+                work = self.storage._work_context_text()
+                question = item['question']
+                if work:
+                    question += (
+                        '\n\nТекущий рабочий контекст TOORU. Используй только если относится к теме:\n'
+                        + work
+                    )
                 result = call_yandex_ai(
-                    self.storage, item['question'], item['topic'],
+                    self.storage, question, item['topic'],
                     max_output_tokens=2600, purpose='learning'
                 )
                 review = self.storage.review_learning_answer(
@@ -2654,6 +3136,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.chat_state())
                 elif path == '/api/brain/reason/status':
                     self.send(200, storage.reasoning_state())
+                elif path == '/api/brain/lab':
+                    self.send(200, storage.brain_lab_state())
                 elif path == '/api/dragon/status':
                     self.send(200, storage.dragon_status())
                 elif path == '/api/dragon/project':
@@ -2717,6 +3201,18 @@ def make_server(storage, port=8765):
                     self.send(200, storage.brain_automation_config(item))
                 elif self.path == '/api/brain/reason':
                     self.send(200, storage.reason_problem(item))
+                elif self.path == '/api/brain/context':
+                    self.send(200, storage.save_work_context(item))
+                elif self.path == '/api/brain/experiment':
+                    self.send(201, storage.create_brain_experiment(item))
+                elif self.path == '/api/brain/experiment/action':
+                    experiment_id = item.get('id')
+                    if type(experiment_id) is not int:
+                        raise ValueError('Некорректный номер эксперимента.')
+                    result = storage.run_brain_experiment(experiment_id)
+                    if not result:
+                        raise ValueError('Эксперимент не найден или уже выполняется.')
+                    self.send(200, result)
                 elif self.path == '/api/brain/goal':
                     self.send(201, storage.create_goal(item))
                 elif self.path == '/api/brain/goal/action':

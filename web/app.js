@@ -204,24 +204,24 @@ function usageStrip(usage,scope='all'){
   </div>`;
 }
 function brainSuggestionsMarkup(items){
-  const rows=items||[];
-  if(!rows.length)return '';
-  const names={memory:'Память',knowledge:'Знание',learning:'Доучиться'};
-  return `<section class="brain-panel">
-    <div class="section-head"><div><span class="eyebrow">Мозг Тори</span><h2>Предложения</h2></div><span class="status-label">${rows.length}</span></div>
-    <div class="brain-list">${rows.map(x=>{
-      const main=x.kind==='learning'?(x.topic||'Тема'):(x.title||'Предложение');
-      const body=x.kind==='learning'?(x.question||''):(x.body||'');
-      const confidence=Math.round((Number(x.confidence)||0)*100);
-      return `<article class="brain-card">
-        <div class="brain-card-head"><span class="brain-kind">${names[x.kind]||escapeHtml(x.kind)}</span><span class="meta">${confidence}%</span></div>
-        <h3>${escapeHtml(main)}</h3>
-        <p>${escapeHtml(body)}</p>
-        ${x.reason?`<small>${escapeHtml(x.reason)}</small>`:''}
-        <div class="brain-actions"><button class="primary" data-brain-action="accept" data-brain-id="${x.id}">Принять</button><button class="action" data-brain-action="reject" data-brain-id="${x.id}">Отклонить</button></div>
-      </article>`;
-    }).join('')}</div>
-  </section>`;
+  const rows=[...(items||[])].sort((a,b)=>(Number(b.confidence)||0)-(Number(a.confidence)||0));
+  if(!rows.length)return '<div class="empty-state compact">Новых предложений нет. Мозг не будет заполнять список ради количества.</div>';
+  const names={memory:'Память',knowledge:'Знание',learning:'Обучение'};
+  const icons={memory:'◈',knowledge:'▤',learning:'◎'};
+  return '<div class="brain-suggestion-list">'+rows.map(x=>{
+    const main=x.kind==='learning'?(x.topic||'Тема'):(x.title||'Предложение');
+    const body=x.kind==='learning'?(x.question||''):(x.body||'');
+    const confidence=Math.round((Number(x.confidence)||0)*100);
+    const tone=confidence>=85?'strong':confidence>=70?'medium':'weak';
+    return '<article class="brain-suggestion-card tone-'+tone+'">'+
+      '<div class="brain-suggestion-icon">'+(icons[x.kind]||'•')+'</div>'+
+      '<div class="brain-suggestion-main"><div class="brain-card-head"><span class="brain-kind">'+escapeHtml(names[x.kind]||x.kind)+'</span><span class="confidence-pill">'+confidence+'%</span></div>'+
+      '<h3>'+escapeHtml(main)+'</h3><p>'+escapeHtml(body)+'</p>'+
+      (x.reason?'<div class="brain-reason"><strong>Почему:</strong> '+escapeHtml(x.reason)+'</div>':'')+
+      (x.source_message_id?'<small>Источник: сообщение #'+String(x.source_message_id)+'</small>':'')+
+      '</div><div class="brain-actions"><button class="primary" data-brain-action="accept" data-brain-id="'+x.id+'">Принять</button><button class="action" data-brain-action="reject" data-brain-id="'+x.id+'">Отклонить</button></div>'+
+    '</article>';
+  }).join('')+'</div>';
 }
 function brainGoalsMarkup(goals){
   const rows=goals||[];
@@ -264,22 +264,30 @@ function chatPanel(){
   </section>`;
 }
 function reasoningItemsMarkup(r){
-  const rows=r.items||[];
-  if(!rows.length)return '<div class="empty-state">Разборов пока нет.</div>';
-  return rows.map(item=>{
+  const rows=(r.items||[]).slice(0,8);
+  if(!rows.length)return '<div class="empty-state compact">Логических разборов пока нет.</div>';
+  return '<div class="reasoning-history">'+rows.map(item=>{
     const x=item.result||{};
-    const list=(title,values)=>Array.isArray(values)&&values.length?'<div class="review-box"><strong>'+escapeHtml(title)+'</strong><ul>'+values.map(v=>'<li>'+escapeHtml(v)+'</li>').join('')+'</ul></div>':'';
-    const options=Array.isArray(x.options)&&x.options.length?'<div class="goal-steps">'+x.options.map((o,index)=>'<div class="goal-step"><span>'+String(index+1)+'</span><div><strong>'+escapeHtml(o.title||'Вариант')+'</strong>'+(o.pros?.length?'<small>Плюсы: '+escapeHtml(o.pros.join(' · '))+'</small>':'')+(o.cons?.length?'<small>Минусы: '+escapeHtml(o.cons.join(' · '))+'</small>':'')+'</div></div>').join('')+'</div>':'';
-    const sources=(item.context||[]).length?'<small>Контекст: '+item.context.map(s=>escapeHtml(s.title)).join(' · ')+'</small>':'';
-    return '<article class="goal-card"><div class="brain-card-head"><div><span class="brain-kind">Логический разбор</span><h3>'+escapeHtml(item.problem)+'</h3></div><span class="status-label">'+Math.round((Number(x.confidence)||0)*100)+'%</span></div>'+
-      (x.summary?'<p>'+escapeHtml(x.summary)+'</p>':'')+
-      list('Факты',x.facts)+list('Допущения',x.assumptions)+options+list('Противоречия',x.contradictions)+
-      list('Слабые места',x.critique?.weaknesses)+list('Не хватает данных',x.critique?.missing_evidence)+
-      list('Что стоит изучить',(x.learning_gaps||[]).map(g=>g.topic+' — '+g.question))+
-      (x.decision?'<div class="review-box"><strong>Решение после проверки</strong><p>'+escapeHtml(x.decision)+'</p></div>':'')+
-      (x.next_step?'<p><strong>Следующий шаг:</strong> '+escapeHtml(x.next_step)+'</p>':'')+
-      sources+'<small>'+escapeHtml(fmtDate(item.created_at))+' · '+String(item.input_tokens||0)+' + '+String(item.output_tokens||0)+' ток.</small></article>';
-  }).join('');
+    const confidence=Math.round((Number(x.confidence)||0)*100);
+    const missing=x.critique?.missing_evidence||[];
+    const weak=x.critique?.weaknesses||[];
+    const gaps=x.learning_gaps||[];
+    const details=[
+      ['Факты',x.facts],['Допущения',x.assumptions],['Противоречия',x.contradictions],
+      ['Слабые места',weak],['Не хватает данных',missing],
+      ['Что изучить',gaps.map(g=>(g.topic||'Тема')+' — '+(g.question||''))]
+    ].filter(([,values])=>Array.isArray(values)&&values.length);
+    const detailsHtml=details.length?'<details class="reasoning-details"><summary>Показать доказательства и критику</summary>'+details.map(([title,values])=>'<div><strong>'+escapeHtml(title)+'</strong><ul>'+values.map(v=>'<li>'+escapeHtml(v)+'</li>').join('')+'</ul></div>').join('')+'</details>':'';
+    return '<article class="reasoning-card">'+
+      '<div class="reasoning-card-top"><div><span class="eyebrow">Логический разбор</span><h3>'+escapeHtml(item.problem)+'</h3></div><div class="reasoning-confidence"><strong>'+confidence+'%</strong><small>уверенность</small></div></div>'+
+      (x.summary?'<p class="reasoning-summary">'+escapeHtml(x.summary)+'</p>':'')+
+      (x.decision?'<div class="reasoning-decision"><small>Решение после критика</small><strong>'+escapeHtml(x.decision)+'</strong></div>':'')+
+      (x.next_step?'<div class="reasoning-next"><span>→</span><div><small>Следующий шаг</small><strong>'+escapeHtml(x.next_step)+'</strong></div></div>':'')+
+      (missing.length?'<div class="reasoning-warning">Не хватает данных: '+escapeHtml(missing.slice(0,2).join(' · '))+'</div>':'')+
+      detailsHtml+
+      '<div class="reasoning-meta"><span>'+escapeHtml(fmtDate(item.created_at))+'</span><span>'+String(item.input_tokens||0)+' + '+String(item.output_tokens||0)+' ток.</span>'+(item.context?.length?'<span>Контекст: '+item.context.length+'</span>':'')+'</div>'+
+    '</article>';
+  }).join('')+'</div>';
 }
 function reasoningPanel(){
   const r=state.reasoning||{configured:false,items:[],usage:{}};
@@ -293,15 +301,24 @@ function reasoningPanel(){
     '</section><section class="panel compact-panel"><div class="section-head"><div><span class="eyebrow">История</span><h2>Разборы Тори</h2></div></div>'+reasoningItemsMarkup(r)+'</section>';
 }
 function learningQueueMarkup(q){
-  const labels={pending:'В очереди',running:'Получает ответ',done:'Готово',stale:'Зависла',error:'Ошибка',cancelled:'Отменена',skipped:'Пропущена'};
+  const labels={pending:'В очереди',running:'Изучает',done:'Проверено',stale:'Зависла',error:'Ошибка',cancelled:'Отменена',skipped:'Пропущена'};
   const rows=q.queue||[];
-  return rows.length?rows.map(x=>{
-    const retry=['stale','error','cancelled','skipped'].includes(x.status)?`<button class="mini-action" data-learning-action="retry" data-learning-id="${x.id}">Повторить</button>`:'';
-    const cancel=['pending','running','stale','error'].includes(x.status)?`<button class="mini-action" data-learning-action="cancel" data-learning-id="${x.id}">Отменить</button>`:'';
-    const skip=['pending','stale','error'].includes(x.status)?`<button class="mini-action" data-learning-action="skip" data-learning-id="${x.id}">Пропустить</button>`:'';
-    const review=x.review&&Object.keys(x.review).length?`<div class="review-box"><strong>Самопроверка: ${escapeHtml({good:'хорошо',partial:'частично',uncertain:'неуверенно'}[x.review.verdict]||x.review.verdict||'')}</strong><span>${Math.round((Number(x.review.confidence)||0)*100)}%</span>${x.review.summary?`<p>${escapeHtml(x.review.summary)}</p>`:''}</div>`:'';
-    return `<article class="queue-item"><div><span class="queue-topic">${escapeHtml(x.topic)}</span><p>${escapeHtml(x.question)}</p>${review}${x.last_error?`<small class="queue-error">${escapeHtml(x.last_error)}</small>`:''}<div class="queue-actions">${retry}${skip}${cancel}</div></div><span class="queue-state state-${escapeHtml(x.status)}">${labels[x.status]||escapeHtml(x.status)}</span></article>`;
-  }).join(''):'<div class="empty-state">Очередь пуста.</div>';
+  if(!rows.length)return '<div class="empty-state compact">Очередь пуста. Новые темы появятся из целей, Разума или вручную.</div>';
+  const priority={running:0,pending:1,error:2,stale:3,done:4,skipped:5,cancelled:6};
+  const ordered=[...rows].sort((a,b)=>(priority[a.status]??9)-(priority[b.status]??9)||Number(b.id)-Number(a.id));
+  return '<div class="learning-queue-list">'+ordered.slice(0,40).map(x=>{
+    const retry=['stale','error','cancelled','skipped'].includes(x.status)?'<button class="mini-action" data-learning-action="retry" data-learning-id="'+x.id+'">Повторить</button>':'';
+    const cancel=['pending','running','stale','error'].includes(x.status)?'<button class="mini-action" data-learning-action="cancel" data-learning-id="'+x.id+'">Отменить</button>':'';
+    const skip=['pending','stale','error'].includes(x.status)?'<button class="mini-action" data-learning-action="skip" data-learning-id="'+x.id+'">Пропустить</button>':'';
+    const review=x.review&&Object.keys(x.review).length?'<div class="learning-review verdict-'+escapeHtml(x.review.verdict||'unknown')+'"><div><small>Самопроверка</small><strong>'+escapeHtml({good:'Подтверждено',partial:'Частично',uncertain:'Нужна проверка'}[x.review.verdict]||x.review.verdict||'Без оценки')+'</strong></div><span>'+Math.round((Number(x.review.confidence)||0)*100)+'%</span>'+(x.review.summary?'<p>'+escapeHtml(x.review.summary)+'</p>':'')+'</div>':'';
+    const response=x.status==='done'&&x.response_text?'<details class="learning-answer"><summary>Результат обучения</summary><p>'+escapeHtml(x.response_text)+'</p></details>':'';
+    return '<article class="learning-queue-card status-'+escapeHtml(x.status)+'">'+
+      '<div class="learning-state-rail"></div><div class="learning-queue-main"><div class="brain-card-head"><span class="queue-topic">'+escapeHtml(x.topic)+'</span><span class="queue-state state-'+escapeHtml(x.status)+'">'+escapeHtml(labels[x.status]||x.status)+'</span></div>'+
+      '<h3>'+escapeHtml(x.question)+'</h3>'+
+      '<div class="learning-meta"><span>Попыток: '+String(x.attempts||0)+'</span><span>'+escapeHtml(fmtDate(x.updated_at))+'</span>'+(x.input_tokens||x.output_tokens?'<span>'+String(x.input_tokens||0)+' + '+String(x.output_tokens||0)+' ток.</span>':'')+'</div>'+
+      review+response+(x.last_error?'<div class="queue-error">'+escapeHtml(x.last_error)+'</div>':'')+
+      '<div class="queue-actions">'+retry+skip+cancel+'</div></div></article>';
+  }).join('')+'</div>';
 }
 function learningConversation(q){
   const rows=q.messages||[];
@@ -346,42 +363,57 @@ function learningPanel(){
     <section class="panel compact-panel"><div class="section-head"><div><span class="eyebrow">Очередь</span><h2>План обучения</h2></div></div><div id="queue-list">${learningQueueMarkup(q)}</div></section>
   </div>${brainSuggestionsMarkup(q.suggestions)}`;
 }
+function workContextMarkup(){
+  const ctx=state.brain_lab?.context||{};
+  return '<section class="work-context-card"><div class="work-context-head"><div><span class="eyebrow">Рабочий контекст Тоору</span><h2>О чём Мозг думает сейчас</h2></div><span class="context-live-dot"></span></div>'+
+    '<div class="work-context-grid"><div><small>Сейчас мы работаем над</small><strong>'+escapeHtml(ctx.area||'Не задано')+'</strong></div><div><small>Активная задача</small><strong>'+escapeHtml(ctx.active_task||'Не задана')+'</strong></div><div><small>Последнее решение</small><strong>'+escapeHtml(ctx.last_decision||'Пока нет')+'</strong></div><div><small>Следующий шаг</small><strong>'+escapeHtml(ctx.next_step||'Пока не определён')+'</strong></div></div>'+
+    '<details class="work-context-edit"><summary>Изменить рабочий контекст</summary><form id="brain-context-form" class="clean-form">'+
+    '<label>Область работы<input name="area" maxlength="500" value="'+escapeHtml(ctx.area||'')+'"></label>'+
+    '<label>Активная задача<textarea name="active_task" maxlength="1000" rows="2">'+escapeHtml(ctx.active_task||'')+'</textarea></label>'+
+    '<label>Последнее решение<textarea name="last_decision" maxlength="1200" rows="2">'+escapeHtml(ctx.last_decision||'')+'</textarea></label>'+
+    '<label>Следующий шаг<textarea name="next_step" maxlength="1200" rows="2">'+escapeHtml(ctx.next_step||'')+'</textarea></label>'+
+    '<button class="primary">Сохранить контекст</button></form></details></section>';
+}
+function brainExperimentsMarkup(){
+  const rows=state.brain_lab?.experiments||[];
+  const labels={planned:'Запланирован',running:'Проверяется',done:'Завершён',error:'Ошибка'};
+  const verdicts={confirmed:'Подтверждено',refuted:'Опровергнуто',inconclusive:'Недостаточно данных',planned:'Ожидает'};
+  const cards=rows.length?rows.slice(0,20).map(x=>{
+    const before=Math.round((Number(x.confidence_before)||0)*100),after=Math.round((Number(x.confidence_after)||0)*100);
+    const run=['planned','error'].includes(x.status)?'<button class="mini-action" data-experiment-run="'+x.id+'">Проверить сейчас</button>':'';
+    return '<article class="experiment-card status-'+escapeHtml(x.status)+'"><div class="experiment-top"><div><span class="brain-kind">'+escapeHtml(x.experiment_type==='project_scan'?'Проверка проекта':'Проверка знаний')+'</span>'+(x.auto_allowed?'<span class="experiment-auto">Авто</span>':'<span class="experiment-manual">Ручной</span>')+'<h3>'+escapeHtml(x.hypothesis)+'</h3></div><span class="experiment-state">'+escapeHtml(labels[x.status]||x.status)+'</span></div>'+
+      (x.plan?'<div class="experiment-row"><small>Эксперимент</small><p>'+escapeHtml(x.plan)+'</p></div>':'')+
+      (x.expected_result?'<div class="experiment-row"><small>Ожидание</small><p>'+escapeHtml(x.expected_result)+'</p></div>':'')+
+      (x.actual_result?'<div class="experiment-row result"><small>Фактический результат</small><p>'+escapeHtml(x.actual_result)+'</p></div>':'')+
+      '<div class="experiment-footer"><span>'+before+'% → '+(x.status==='done'?after+'%':'…')+'</span><strong>'+escapeHtml(verdicts[x.verdict]||x.verdict||'Ожидает')+'</strong>'+run+'</div>'+
+      (x.lesson?'<div class="experiment-lesson"><strong>Урок:</strong> '+escapeHtml(x.lesson)+'</div>':'')+
+    '</article>';
+  }).join(''):'<div class="empty-state compact">Экспериментов пока нет. Разум создаст проверку, когда ему не хватит доказательств.</div>';
+  return '<section class="brain-section"><div class="section-head"><div><span class="eyebrow">Лаборатория Разума</span><h2>Гипотезы и эксперименты</h2></div><span class="status-label">'+rows.filter(x=>['planned','running'].includes(x.status)).length+' активных</span></div>'+
+    '<p class="brain-section-lead">Тоору не должна учиться на догадках: гипотеза сначала проверяется, затем подтверждённый урок может попасть в Знания.</p>'+
+    '<form id="brain-experiment-form" class="experiment-form"><input name="hypothesis" maxlength="3000" placeholder="Гипотеза для проверки" required><select name="experiment_type"><option value="knowledge_check">Проверка знаний</option><option value="project_scan">Проверка проекта</option></select><input name="plan" maxlength="4000" placeholder="Как проверить?"><input name="expected_result" maxlength="3000" placeholder="Какой результат ожидается?"><button class="action">Добавить эксперимент</button></form>'+
+    '<div id="experiment-list">'+cards+'</div></section>';
+}
 function brainCenterPanel(){
   const q=state.learning||{mode:'stopped',configured:false,queue:[],messages:[],automation:{}};
   const r=state.reasoning||{configured:false,items:[],usage:{}};
   const goals=state.chat?.goals||[];
+  const suggestions=q.suggestions||[];
   const active=(q.queue||[]).filter(x=>['pending','running'].includes(x.status)).length;
+  const errors=(q.queue||[]).filter(x=>['error','stale'].includes(x.status)).length;
   const auto=!!q.automation?.enabled;
-  return `<section class="learning-shell">
-    <div class="learning-hero"><div><span class="eyebrow">Мозг Тори</span><h2>Разум + цели + самообучение</h2><p>Один цикл: понять цель → найти нехватку знаний → изучить → проверить → обновить план.</p></div><span class="model-pill">Qwen3.6 35B</span></div>
-    <div class="learning-statusbar compact-status">
-      <div class="status-chip"><i class="status-dot ${auto?'is-on':'is-off'}"></i><span>Авторазвитие</span><strong>${auto?'Включено':'Выключено'}</strong></div>
-      <div class="status-chip"><i class="status-dot ${q.last_success>0?'is-on':'is-warn'}"></i><span>AI</span><strong>${q.last_success>0?'Подключён':'Готовность не проверена'}</strong></div>
-      <div class="status-chip"><i class="status-dot is-idle"></i><span>В работе</span><strong>${active}</strong></div>
-      <div class="status-chip"><i class="status-dot is-on"></i><span>Цели</span><strong>${goals.length}</strong></div>
-    </div>
-    ${usageStrip(q.usage,'all')}
-    <form id="brain-automation-form" class="panel clean-form">
-      <label class="context-toggle"><input type="checkbox" name="enabled" value="1" ${auto?'checked':''}> <strong>Авторазвитие Тори</strong> — самой продолжать обучение и переоценивать цели</label>
-      <details><summary>Дополнительно</summary><div class="budget-fields">
-        <label>Уверенность<input name="min_confidence" type="number" min="0.50" max="0.95" step="0.05" value="${q.automation?.min_confidence??0.75}"></label>
-        <label>Задач в день<input name="daily_limit" type="number" min="1" max="20" value="${q.automation?.daily_limit??5}"></label>
-        <label>Глубина темы<input name="chain_limit" type="number" min="1" max="6" value="${q.automation?.chain_limit??3}"></label>
-      </div></details>
-      <button class="primary">Сохранить</button>
-    </form>
-  </section>
-  ${brainGoalsMarkup(goals)}
-  <section class="panel clean-form"><span class="eyebrow">Разум v2</span><h2>Разобрать задачу</h2>
-    <form id="reasoning-form"><textarea name="problem" maxlength="12000" rows="3" placeholder="Что Тори должна обдумать?" required></textarea>
-    <label class="context-toggle"><input type="checkbox" name="use_context" value="1" checked> Память и знания</label><button class="primary">Обдумать</button></form>
-  </section>
-  <details class="panel"><summary><strong>Последние логические разборы</strong></summary>${reasoningItemsMarkup(r)}</details>
-  <details class="panel"><summary><strong>Обучение и очередь</strong> · ${active} активных</summary>
-    <form id="learning-queue-form" class="clean-form"><input name="topic" maxlength="300" placeholder="Тема" required><textarea name="question" maxlength="8000" placeholder="Вопрос для Qwen" required></textarea><button class="action">Добавить вручную</button></form>
-    <div id="queue-list">${learningQueueMarkup(q)}</div>
-  </details>
-  <details class="panel"><summary><strong>Предложения Мозга</strong> · ${(q.suggestions||[]).length}</summary>${brainSuggestionsMarkup(q.suggestions)}</details>`;
+  const experiments=state.brain_lab?.experiments||[];
+  return workContextMarkup()+
+  '<section class="brain-command-center"><div class="brain-command-hero"><div><span class="eyebrow">Мозг Тоору · 0.0.4</span><h2>Понять → проверить → изучить → сделать вывод</h2><p>Рабочий контекст объединяет Разум, обучение, эксперименты и предложения в один проверяемый цикл.</p></div><span class="model-pill">Qwen3.6 35B</span></div>'+
+    '<div class="brain-metrics"><div><span>Авторазвитие</span><strong>'+(auto?'Включено':'Выключено')+'</strong></div><div><span>В обучении</span><strong>'+active+'</strong></div><div><span>Эксперименты</span><strong>'+experiments.filter(x=>['planned','running'].includes(x.status)).length+'</strong></div><div class="'+(errors?'has-error':'')+'"><span>Проблемы очереди</span><strong>'+errors+'</strong></div><div><span>Предложения</span><strong>'+suggestions.length+'</strong></div></div>'+
+    usageStrip(q.usage,'all')+
+    '<form id="brain-automation-form" class="brain-auto-bar"><label class="context-toggle"><input type="checkbox" name="enabled" value="1" '+(auto?'checked':'')+'> <strong>Авторазвитие</strong> — продолжать обучение, эксперименты и переоценку целей</label><div class="brain-auto-counters"><span>Обучение сегодня: <strong>'+(q.automation?.today_count||0)+' / '+(q.automation?.daily_limit||5)+'</strong></span><span>Эксперименты: <strong>'+(q.automation?.experiment_today_count||0)+' / '+(q.automation?.experiment_daily_limit||3)+'</strong></span></div><details><summary>Лимиты</summary><div class="budget-fields"><label>Уверенность<input name="min_confidence" type="number" min="0.50" max="0.95" step="0.05" value="'+(q.automation?.min_confidence??0.75)+'"></label><label>Задач в день<input name="daily_limit" type="number" min="1" max="20" value="'+(q.automation?.daily_limit??5)+'"></label><label>Глубина темы<input name="chain_limit" type="number" min="1" max="6" value="'+(q.automation?.chain_limit??3)+'"></label></div></details><button class="primary">Сохранить</button></form></section>'+
+  '<div class="brain-two-column"><section class="brain-section reasoning-new"><div class="section-head"><div><span class="eyebrow">Разум v3</span><h2>Новый логический разбор</h2></div><span class="status-label">анализ + критик + эксперимент</span></div><form id="reasoning-form" class="clean-form"><textarea name="problem" maxlength="12000" rows="4" placeholder="Что Тоору должна обдумать и проверить?" required></textarea><label class="context-toggle"><input type="checkbox" name="use_context" value="1" checked> Рабочий контекст + Память и Знания</label><button class="primary">Обдумать и проверить</button></form></section>'+
+  '<section class="brain-section brain-goals-compact">'+brainGoalsMarkup(goals)+'</section></div>'+
+  brainExperimentsMarkup()+
+  '<section class="brain-section"><div class="section-head"><div><span class="eyebrow">Обучение</span><h2>Очередь знаний</h2></div><div class="brain-section-actions"><span class="status-label">'+active+' активных</span>'+(errors?'<span class="status-label warning">'+errors+' требуют внимания</span>':'')+'</div></div><p class="brain-section-lead">Сначала активные и проблемные задачи, затем завершённые. Самопроверка показывает, чему действительно можно доверять.</p><form id="learning-queue-form" class="learning-inline-form"><input name="topic" maxlength="300" placeholder="Тема" required><textarea name="question" maxlength="8000" rows="2" placeholder="Что нужно изучить?" required></textarea><button class="action">Добавить вручную</button></form><div id="queue-list">'+learningQueueMarkup(q)+'</div></section>'+
+  '<section class="brain-section"><div class="section-head"><div><span class="eyebrow">Предложения Мозга</span><h2>Что Тоору хочет запомнить или изучить</h2></div><span class="status-label">'+suggestions.length+'</span></div><p class="brain-section-lead">Предложения отсортированы по уверенности. Память и личные факты по-прежнему применяются только после твоего подтверждения.</p>'+brainSuggestionsMarkup(suggestions)+'</section>'+
+  '<section class="brain-section"><div class="section-head"><div><span class="eyebrow">История решений</span><h2>Последние логические разборы</h2></div><span class="status-label">'+Math.min((r.items||[]).length,8)+'</span></div>'+reasoningItemsMarkup(r)+'</section>';
 }
 function dataPanel(){
   return '<div class="learning-columns">'+
@@ -599,6 +631,7 @@ content.addEventListener('click',async event=>{
     if(b.dataset.learningControl){await api('learning/control',{action:b.dataset.learningControl});await reload();render();message('Режим обучения обновлён.')}
     if(b.dataset.learningAction){await api('learning/action',{id:Number(b.dataset.learningId),action:b.dataset.learningAction});await reload();render();message('Задача обновлена.')}
     if(b.dataset.brainAction){await api('brain/action',{id:Number(b.dataset.brainId),action:b.dataset.brainAction});await reload();render();message(b.dataset.brainAction==='accept'?'Предложение применено.':'Предложение отклонено.')}
+    if(b.dataset.experimentRun){message('Тоору проверяет гипотезу…');await api('brain/experiment/action',{id:Number(b.dataset.experimentRun)});await reload();render();message('Эксперимент завершён.','success')}
     if(b.dataset.goalAction){await api('brain/goal/action',{id:Number(b.dataset.goalId),action:b.dataset.goalAction,step:b.dataset.step===undefined?null:Number(b.dataset.step)});await reload();render();message('Цель обновлена.')}
     if(b.hasAttribute('data-dragon-scan')){const result=await api('dragon/project');window.dragonProjectFiles=result.files||[];render();message('Проект проверен.')}
     if(b.hasAttribute('data-dragon-explorer')){const result=await api('dragon/project');window.dragonProjectFiles=result.files||[];render();message('Проводник обновлён.')}
@@ -636,11 +669,13 @@ content.addEventListener('submit',async event=>{
     });
     if(f.id==='learning-queue-form')await api('learning/queue',values);
     if(f.id==='brain-automation-form')await api('brain/automation',{enabled:values.enabled==='1',min_confidence:Number(values.min_confidence),daily_limit:Number(values.daily_limit),chain_limit:Number(values.chain_limit)});
+    if(f.id==='brain-context-form')await api('brain/context',values);
+    if(f.id==='brain-experiment-form')await api('brain/experiment',{hypothesis:values.hypothesis,experiment_type:values.experiment_type,plan:values.plan||'',expected_result:values.expected_result||'',confidence_before:0.5});
     if(f.id==='goal-form')await api('brain/goal',values);
     if(f.id==='reasoning-form')await api('brain/reason',{problem:values.problem,use_context:values.use_context==='1'});
     if(f.id==='chat-form'){await api('chat/send',{text:values.text,use_context:values.use_context==='1',analyze:values.analyze==='1'});f.reset();for(const name of ['use_context','analyze']){const toggle=f.querySelector('[name="'+name+'"]');if(toggle)toggle.checked=true}}
     await reload();render();
-    message(f.id==='chat-form'?'Дракончик Тоору ответила.':f.id==='reasoning-form'?'Логический разбор готов.':f.id==='dragon-permissions-form'?'Права Дракончика Тоору сохранены.':'Сохранено.');
+    message(f.id==='chat-form'?'Дракончик Тоору ответила.':f.id==='reasoning-form'?'Логический разбор готов — если данных мало, эксперимент уже поставлен.':f.id==='brain-context-form'?'Рабочий контекст обновлён.':f.id==='brain-experiment-form'?'Эксперимент добавлен в Лабораторию.':f.id==='dragon-permissions-form'?'Права Дракончика Тоору сохранены.':'Сохранено.');
   }catch(error){message(error.message)}finally{if(b)b.disabled=false}
 });
 async function refreshLearningStatus(){
