@@ -22,7 +22,11 @@ BRANCH = "main"
 API_BRANCH = f"https://api.github.com/repos/{REPOSITORY}/branches/{BRANCH}"
 API_COMPARE = f"https://api.github.com/repos/{REPOSITORY}/compare"
 ZIP_URL = f"https://github.com/{REPOSITORY}/archive/refs/heads/{BRANCH}.zip"
-USER_AGENT = "TOORU-DRAGON-Updater/0.0.0"
+try:
+    UPDATER_VERSION = (Path(__file__).resolve().parent / "VERSION").read_text("utf-8").strip() or "0.0.0"
+except OSError:
+    UPDATER_VERSION = "0.0.0"
+USER_AGENT = f"TOORU-DRAGON-Updater/{UPDATER_VERSION}"
 STATE_REL = Path("data") / "update_state.json"
 LOG_REL = Path("data") / "logs" / "update.log"
 MANIFEST_REL = Path("data") / "update_manifest.json"
