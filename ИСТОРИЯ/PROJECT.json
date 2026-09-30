@@ -20,11 +20,11 @@
   },
   "project": {
     "name": "TOORU · DRAGON",
-    "version": "0.0.3",
+    "version": "0.0.4",
     "repository": "https://github.com/Aspksa/TOORU-DRAGON",
     "branch": "main",
-    "code_baseline_commit": "37278c312e24f379a0bc96b79d21e07985102333",
-    "stage": "Релиз 0.0.3: наблюдаемая Дракончик Тоору, умные уведомления, чат→задача, дневник и решения перед опасными действиями.",
+    "code_baseline_commit": "ee22b0c35a6c56469307f061a7bf661457efe71f",
+    "stage": "Релиз 0.0.4: рабочий контекст, Лаборатория Разума, безопасные эксперименты, дедупликация обучения и новый экран Мозга.",
     "goal": "Личный помощник Тори с долговременной памятью, домашними и рабочими проектами, позднее мобильным доступом и обучением."
   },
   "architecture": {
@@ -129,7 +129,7 @@
   "storage": {
     "database": "data/tooru.sqlite3",
     "engine": "SQLite",
-    "schema_version": 11,
+    "schema_version": 12,
     "tables": [
       "settings",
       "records",
@@ -138,6 +138,8 @@
       "brain_suggestions",
       "brain_goals",
       "brain_reasoning",
+      "work_context",
+      "brain_experiments",
       "dragon_notifications",
       "dragon_actions",
       "dragon_tasks"
@@ -576,7 +578,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "Релиз 0.0.3 подготовлен; финальный Windows CI будет зафиксирован после PR.",
+    "current_change_tests": "Релиз 0.0.4 подготовлен; финальный Windows CI будет зафиксирован после PR.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
@@ -791,6 +793,53 @@
       "Дневник",
       "планы задач",
       "связь задач с сообщениями чата"
+    ]
+  },
+  "release_004": {
+    "version": "0.0.4",
+    "focus": "Рабочий контекст и Лаборатория Разума",
+    "work_context": [
+      "area",
+      "active_task",
+      "last_decision",
+      "next_step"
+    ],
+    "connected_to": [
+      "chat",
+      "reasoning",
+      "learning",
+      "dragon_tasks"
+    ],
+    "experiments": {
+      "types": [
+        "knowledge_check",
+        "project_scan"
+      ],
+      "lifecycle": [
+        "planned",
+        "running",
+        "done",
+        "error"
+      ],
+      "verdicts": [
+        "confirmed",
+        "refuted",
+        "inconclusive"
+      ],
+      "knowledge_rule": "lesson + confirmed/refuted + confidence_after >= 0.8"
+    },
+    "brain_ui": [
+      "Рабочий контекст",
+      "Разум v3",
+      "Лаборатория Разума",
+      "Очередь знаний",
+      "Предложения Мозга",
+      "История решений"
+    ],
+    "learning_fixes": [
+      "exact duplicate queue reuse",
+      "review/reflection skip already queued/running/done",
+      "verified learning updates work context"
     ]
   }
 }
