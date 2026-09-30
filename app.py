@@ -16,12 +16,32 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import webbrowser
 import updater
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '0.0.0'
+try:
+    VERSION = (ROOT / 'VERSION').read_text('utf-8').strip() or '0.0.0'
+except OSError:
+    VERSION = '0.0.0'
+
+def release_manifest():
+    try:
+        data = json.loads((ROOT / 'RELEASE.json').read_text('utf-8'))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+def web_asset_revision():
+    digest = hashlib.sha256()
+    for relative in ('web/app.js', 'web/style.css'):
+        try:
+            digest.update((ROOT / relative).read_bytes())
+        except OSError:
+            digest.update(relative.encode('utf-8'))
+    return digest.hexdigest()[:12]
 KINDS = {'work', 'home', 'memory', 'knowledge', 'topic', 'chat'}
 YANDEX_AI_URL = 'https://ai.api.cloud.yandex.net/v1/responses'
 DEFAULT_YANDEX_FOLDER = 'b1gpcfme4j9b9bv37hqb'
@@ -346,7 +366,8 @@ class Storage:
         chat = self.chat_state()
         reasoning = self.reasoning_state()
         dragon = self.dragon_status()
-        return dict(version=VERSION, settings=settings, counts=counts, records=records,
+        return dict(version=VERSION, release=release_manifest(), asset_revision=web_asset_revision(),
+                    settings=settings, counts=counts, records=records,
                     ai_connected=learning['configured'] and learning['last_success'] > 0,
                     learning=learning, chat=chat, reasoning=reasoning, dragon=dragon)
 
@@ -2351,7 +2372,9 @@ def make_server(storage, port=8765):
             self.send_response(code)
             self.send_header('Content-Type', mime)
             self.send_header('Content-Length', str(len(data)))
-            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
@@ -2372,32 +2395,40 @@ def make_server(storage, port=8765):
             return True
 
         def do_GET(self):
-            if not self.allowed(self.path.startswith('/api/')):
+            path = urllib.parse.urlsplit(self.path).path
+            if not self.allowed(path.startswith('/api/')):
                 return
             try:
-                if self.path == '/health':
+                if path == '/health':
                     self.send(200, {'app': 'TOORU-DRAGON', 'instance': instance, 'version': VERSION})
-                elif self.path in ('/', '/index.html'):
-                    html = (ROOT / 'web' / 'index.html').read_text('utf-8').replace('__TOKEN__', token)
+                elif path in ('/', '/index.html'):
+                    asset_revision = web_asset_revision()
+                    html = (ROOT / 'web' / 'index.html').read_text('utf-8')
+                    html = html.replace('__TOKEN__', token)
+                    html = html.replace('__VERSION__', VERSION)
+                    html = html.replace('__ASSET_REV__', asset_revision)
                     self.send(200, html, 'text/html; charset=utf-8')
-                elif self.path in ('/app.js', '/style.css'):
-                    mime = 'text/javascript' if self.path.endswith('.js') else 'text/css'
-                    self.send(200, (ROOT / 'web' / self.path[1:]).read_bytes(), mime + '; charset=utf-8')
-                elif self.path == '/api/state':
+                elif path in ('/app.js', '/style.css'):
+                    mime = 'text/javascript' if path.endswith('.js') else 'text/css'
+                    self.send(200, (ROOT / 'web' / path[1:]).read_bytes(), mime + '; charset=utf-8')
+                elif path == '/api/state':
                     self.send(200, storage.state())
-                elif self.path == '/api/diagnostics':
+                elif path == '/api/diagnostics':
                     self.send(200, storage.diagnostics())
-                elif self.path == '/api/learning/status':
+                elif path == '/api/learning/status':
                     self.send(200, storage.learning_state())
-                elif self.path == '/api/chat/status':
+                elif path == '/api/chat/status':
                     self.send(200, storage.chat_state())
-                elif self.path == '/api/brain/reason/status':
+                elif path == '/api/brain/reason/status':
                     self.send(200, storage.reasoning_state())
-                elif self.path == '/api/dragon/status':
+                elif path == '/api/dragon/status':
                     self.send(200, storage.dragon_status())
-                elif self.path == '/api/dragon/project':
+                elif path == '/api/dragon/project':
                     self.send(200, {'files': storage.dragon_project_tree()})
-                elif self.path == '/api/update/status':
+                elif path == '/api/release':
+                    self.send(200, {'version': VERSION, 'asset_revision': web_asset_revision(),
+                                    'release': release_manifest()})
+                elif path == '/api/update/status':
                     self.send(200, updater.local_status(ROOT))
                 else:
                     self.send(404, {'error': 'Страница не найдена.'})
