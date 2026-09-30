@@ -455,8 +455,8 @@ class CoreTest(unittest.TestCase):
                 "VALUES ('memory','Имя','Антон','Личный факт',0.99)"
             )
             db.execute(
-                "INSERT INTO brain_suggestions(kind,topic,question,reason,confidence) "
-                "VALUES ('learning','SQLite','Что такое WAL?','Учебный пробел',0.85)"
+                "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                "VALUES ('learning','','SQLite','Что такое WAL?','Учебный пробел',0.85)"
             )
             db.execute(
                 "INSERT INTO brain_suggestions(kind,topic,question,reason,confidence) "
@@ -488,8 +488,8 @@ class CoreTest(unittest.TestCase):
         with self.storage.connect() as db:
             for index in range(2):
                 db.execute(
-                    "INSERT INTO brain_suggestions(kind,topic,question,reason,confidence) "
-                    "VALUES ('learning',?,?,?,0.9)",
+                    "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                    "VALUES ('learning','',?,?,?,0.9)",
                     (f'Topic {index}', f'Question {index}', 'test')
                 )
         self.assertIsNotNone(self.storage.promote_autonomous_learning())
