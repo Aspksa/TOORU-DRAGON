@@ -346,7 +346,7 @@ class CoreTest(unittest.TestCase):
         state = self.request('/api/state')
         self.assertEqual(state['reasoning']['items'][0]['problem'], 'Что развивать дальше в TOORU?')
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 9)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 10)
 
     def test_reasoning_engine_handles_invalid_model_json_without_hidden_trace(self):
         self.request('/api/ai/config', {
@@ -952,9 +952,9 @@ class CoreTest(unittest.TestCase):
             self.assertIn('роутер', messages[0]['text'])
             self.assertIn('пакеты', messages[1]['text'])
 
-    def test_schema_v9_has_brain_and_dragon_tables(self):
+    def test_schema_v10_has_brain_and_dragon_tables(self):
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 9)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 10)
             columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
         self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens','context_json'} <= columns)
         with self.storage.connect() as db:
@@ -970,6 +970,9 @@ class CoreTest(unittest.TestCase):
             action_columns = {row[1] for row in db.execute('PRAGMA table_info(dragon_actions)').fetchall()}
         self.assertTrue({'level','title','body','action','is_read','created_at'} <= notification_columns)
         self.assertTrue({'capability','target','summary','status','details_json','created_at'} <= action_columns)
+        with self.storage.connect() as db:
+            task_columns = {row[1] for row in db.execute('PRAGMA table_info(dragon_tasks)').fetchall()}
+        self.assertTrue({'title','action_type','payload_json','status','result_json','created_at','updated_at'} <= task_columns)
 
     def test_dragon_permissions_notifications_and_project_access(self):
         status = self.request('/api/dragon/status')
@@ -998,6 +1001,45 @@ class CoreTest(unittest.TestCase):
 
         read = self.request('/api/dragon/project/read', {'path': 'AGENTS.md'})
         self.assertIn('TOORU', read['text'])
+
+    def test_dragon_modes_task_queue_and_manual_execution(self):
+        status = self.request('/api/dragon/status')
+        self.assertEqual(status['mode'], 'suggest')
+        self.assertTrue(any(skill['id'] == 'project_scan' for skill in status['skills']))
+        self.assertEqual(len(status['activity']), 14)
+
+        status = self.request('/api/dragon/mode', {'mode': 'observe'})
+        self.assertEqual(status['mode'], 'observe')
+        task = self.request('/api/dragon/task', {
+            'title': 'Проверить проект',
+            'action_type': 'project_scan',
+            'payload': {},
+        })
+        self.assertEqual(task['status'], 'suggested')
+        status = self.request('/api/dragon/status')
+        queued = next(x for x in status['tasks'] if x['id'] == task['id'])
+        self.assertEqual(queued['status'], 'suggested')
+
+        status = self.request('/api/dragon/task/action', {'id': task['id'], 'action': 'run'})
+        done = next(x for x in status['tasks'] if x['id'] == task['id'])
+        self.assertEqual(done['status'], 'done')
+        self.assertGreater(done['result']['files'], 0)
+
+    def test_dragon_execute_mode_processes_safe_queue(self):
+        self.request('/api/dragon/mode', {'mode': 'execute'})
+        task = self.request('/api/dragon/task', {
+            'title': 'Копия базы',
+            'action_type': 'database_backup',
+            'payload': {},
+        })
+        self.assertEqual(task['status'], 'pending')
+        result = self.storage.run_next_dragon_task()
+        self.assertEqual(result['status'], 'done')
+        status = self.request('/api/dragon/status')
+        done = next(x for x in status['tasks'] if x['id'] == task['id'])
+        self.assertEqual(done['status'], 'done')
+        backup = self.storage.directory / 'backups' / done['result']['filename']
+        self.assertTrue(backup.exists())
 
     def test_dragon_project_write_is_guarded_and_backed_up(self):
         target = app.ROOT / 'web' / 'dragon-test.txt'
@@ -1038,13 +1080,29 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Проверить проект', ui)
         self.assertIn('Открыть Мозг', ui)
         self.assertIn('Резервная копия', ui)
-        self.assertIn('Последние действия', ui)
+        self.assertIn('Что Тоору делала', ui)
         self.assertIn('.dragon-hero', css)
         self.assertIn('.dragon-quick-grid', css)
         # Права больше не дублируются в общей странице Настройки.
         settings_start = ui.index("page==='settings'")
         settings_end = ui.index("page==='dragon'", settings_start)
         self.assertNotIn('dragonSettings()', ui[settings_start:settings_end])
+
+    def test_dragon_action_center_has_modes_tasks_skills_voice_and_explorer(self):
+        html = (app.ROOT / 'web' / 'index.html').read_text('utf-8')
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
+        self.assertIn('dragon-menu-status', html)
+        for text_value in ('Наблюдать','Предлагать','Выполнять','Задачи Дракончика',
+                           'Проводник проекта','Что умеет','14 дней','Голосом','Что Тоору делала'):
+            self.assertIn(text_value, ui)
+        self.assertIn('SpeechRecognition', ui)
+        self.assertIn('speechSynthesis', ui)
+        self.assertIn('data-dragon-task-action', ui)
+        self.assertIn('data-dragon-file', ui)
+        self.assertIn('.dragon-task', css)
+        self.assertIn('.dragon-file-list', css)
+        self.assertIn('.dragon-menu-status', css)
 
     def test_dragon_ui_has_permissions_and_popup_notifications(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
