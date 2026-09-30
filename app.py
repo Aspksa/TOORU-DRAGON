@@ -459,10 +459,12 @@ class Storage:
         chat = self.chat_state()
         reasoning = self.reasoning_state()
         dragon = self.dragon_status()
+        brain_lab = self.brain_lab_state()
         return dict(version=VERSION, release=release_manifest(), asset_revision=web_asset_revision(),
                     settings=settings, counts=counts, records=records,
                     ai_connected=learning['configured'] and learning['last_success'] > 0,
-                    learning=learning, chat=chat, reasoning=reasoning, dragon=dragon)
+                    learning=learning, chat=chat, reasoning=reasoning, dragon=dragon,
+                    brain_lab=brain_lab)
 
     def add(self, item):
         kind, title = item.get('kind'), item.get('title', '')
@@ -731,6 +733,219 @@ class Storage:
             except (ValueError, TypeError):
                 return {}
         return data if isinstance(data, dict) else {}
+
+    def work_context(self):
+        with self.connect() as db:
+            row = db.execute(
+                'SELECT area,active_task,last_decision,next_step,source,updated_at '
+                'FROM work_context WHERE id=1'
+            ).fetchone()
+        if not row:
+            return {
+                'area':'','active_task':'','last_decision':'','next_step':'',
+                'source':'system','updated_at':''
+            }
+        return dict(row)
+
+    def save_work_context(self, item, source='manual'):
+        fields = {}
+        for key, limit in (
+            ('area', 500), ('active_task', 1000),
+            ('last_decision', 1200), ('next_step', 1200)
+        ):
+            value = item.get(key, '')
+            if not isinstance(value, str):
+                raise ValueError('Рабочий контекст должен быть текстом.')
+            fields[key] = value.strip()[:limit]
+        if not any(fields.values()):
+            raise ValueError('Заполни хотя бы одно поле рабочего контекста.')
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO work_context(id,area,active_task,last_decision,next_step,source,updated_at) "
+                "VALUES (1,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%SZ','now')) "
+                "ON CONFLICT(id) DO UPDATE SET area=excluded.area,active_task=excluded.active_task,"
+                "last_decision=excluded.last_decision,next_step=excluded.next_step,"
+                "source=excluded.source,updated_at=excluded.updated_at",
+                (fields['area'], fields['active_task'], fields['last_decision'],
+                 fields['next_step'], str(source)[:80])
+            )
+        self.dragon_log_action(
+            'work_context', 'brain', 'Обновлён рабочий контекст',
+            {'area': fields['area'], 'active_task': fields['active_task'],
+             'next_step': fields['next_step']}
+        )
+        return self.work_context()
+
+    def _work_context_text(self):
+        ctx = self.work_context()
+        values = [
+            ('Сейчас мы работаем над', ctx.get('area')),
+            ('Активная задача', ctx.get('active_task')),
+            ('Последнее решение', ctx.get('last_decision')),
+            ('Следующий шаг', ctx.get('next_step')),
+        ]
+        lines = [f'{label}: {value}' for label, value in values if value]
+        return '\n'.join(lines)
+
+    def brain_experiments(self, limit=30):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                'SELECT id,hypothesis,experiment_type,plan,expected_result,actual_result,verdict,'
+                'confidence_before,confidence_after,lesson,reasoning_id,status,created_at,updated_at '
+                'FROM brain_experiments ORDER BY id DESC LIMIT ?',
+                (max(1, min(int(limit), 100)),)
+            )]
+
+    def create_brain_experiment(self, item):
+        hypothesis = item.get('hypothesis', '')
+        experiment_type = item.get('experiment_type', 'knowledge_check')
+        plan = item.get('plan', '')
+        expected = item.get('expected_result', '')
+        reasoning_id = item.get('reasoning_id')
+        try:
+            confidence = max(0.0, min(float(item.get('confidence_before', 0.5)), 1.0))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        if not isinstance(hypothesis, str) or not 3 <= len(hypothesis.strip()) <= 3000:
+            raise ValueError('Гипотеза должна содержать от 3 до 3000 символов.')
+        if experiment_type not in {'knowledge_check','project_scan'}:
+            raise ValueError('Неизвестный безопасный тип эксперимента.')
+        if not isinstance(plan, str) or not isinstance(expected, str):
+            raise ValueError('План и ожидаемый результат должны быть текстом.')
+        if type(reasoning_id) is not int:
+            reasoning_id = None
+        with self.connect() as db:
+            duplicate = db.execute(
+                "SELECT id FROM brain_experiments WHERE status IN ('planned','running') "
+                "AND lower(hypothesis)=lower(?) LIMIT 1",
+                (hypothesis.strip(),)
+            ).fetchone()
+            if duplicate:
+                return {'id': duplicate['id'], 'status': 'planned', 'duplicate': True}
+            cursor = db.execute(
+                'INSERT INTO brain_experiments('
+                'hypothesis,experiment_type,plan,expected_result,confidence_before,reasoning_id'
+                ') VALUES (?,?,?,?,?,?)',
+                (hypothesis.strip()[:3000], experiment_type, plan.strip()[:4000],
+                 expected.strip()[:3000], confidence, reasoning_id)
+            )
+            experiment_id = cursor.lastrowid
+        self.dragon_log_action(
+            'experiment', str(experiment_id), 'Запланирован эксперимент Разума',
+            {'hypothesis': hypothesis.strip()[:500], 'type': experiment_type}
+        )
+        return {'id': experiment_id, 'status': 'planned'}
+
+    def run_brain_experiment(self, experiment_id=None):
+        with self.connect() as db:
+            if experiment_id is None:
+                row = db.execute(
+                    "SELECT * FROM brain_experiments WHERE status='planned' ORDER BY id LIMIT 1"
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT * FROM brain_experiments WHERE id=? AND status IN ('planned','error')",
+                    (experiment_id,)
+                ).fetchone()
+            if not row:
+                return None
+            row = dict(row)
+            db.execute(
+                "UPDATE brain_experiments SET status='running',"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (row['id'],)
+            )
+        try:
+            evidence = ''
+            if row['experiment_type'] == 'project_scan':
+                files = self.dragon_project_tree(600)
+                sample = [x['path'] for x in files[:180]]
+                evidence = (
+                    f"Проект содержит {len(files)} доступных файлов. "
+                    "Примеры путей:\n" + '\n'.join(sample)
+                )
+            else:
+                ctx = self.relevant_context(row['hypothesis'], limit=6, char_budget=7000)
+                if ctx:
+                    evidence = '\n\n'.join(
+                        f"{entry['kind']}: {entry['title']}\n{entry['excerpt']}" for entry in ctx
+                    )
+            work = self._work_context_text()
+            prompt = (
+                'Ты — проверяющий модуль Лаборатории Разума. Не показывай скрытую цепочку рассуждений. '
+                'Проверь гипотезу только по доступным данным и верни JSON: '
+                '{"verdict":"confirmed|refuted|inconclusive","actual_result":"...",'
+                '"confidence_after":0.0,"lesson":"..."}. '
+                'confirmed — только если данных достаточно. refuted — если есть конкретное противоречие. '
+                'Иначе inconclusive. lesson должен быть коротким проверяемым правилом, а не догадкой.\n\n'
+                f"Рабочий контекст:\n{work or 'не задан'}\n\n"
+                f"Гипотеза:\n{row['hypothesis']}\n\n"
+                f"План эксперимента:\n{row['plan']}\n\n"
+                f"Ожидаемый результат:\n{row['expected_result']}\n\n"
+                f"Доступные данные:\n{evidence or 'нет дополнительных данных'}"
+            )
+            result = call_yandex_ai(
+                self, prompt, max_output_tokens=850, purpose='critic'
+            )
+            data = self._parse_json_object(result['text'])
+            verdict = data.get('verdict')
+            if verdict not in {'confirmed','refuted','inconclusive'}:
+                verdict = 'inconclusive'
+            actual = str(data.get('actual_result') or '').strip()[:5000]
+            lesson = str(data.get('lesson') or '').strip()[:3000]
+            try:
+                after = max(0.0, min(float(data.get('confidence_after', row['confidence_before'])), 1.0))
+            except (TypeError, ValueError):
+                after = float(row['confidence_before'] or 0)
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE brain_experiments SET status='done',actual_result=?,verdict=?,"
+                    "confidence_after=?,lesson=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                    "WHERE id=?",
+                    (actual, verdict, after, lesson, row['id'])
+                )
+                if lesson and verdict in {'confirmed','refuted'} and after >= 0.8:
+                    title = ('Проверено' if verdict == 'confirmed' else 'Опровергнуто') +                             ' · ' + row['hypothesis'][:180]
+                    exists = db.execute(
+                        "SELECT 1 FROM records WHERE kind='knowledge' AND lower(title)=lower(?) LIMIT 1",
+                        (title,)
+                    ).fetchone()
+                    if not exists:
+                        db.execute(
+                            'INSERT INTO records(kind,title,body,source) VALUES (?,?,?,?)',
+                            ('knowledge', title, lesson[:20000], 'Лаборатория Разума · эксперимент')
+                        )
+            self.add_ai_message(
+                'brain', 'system', 'Эксперимент Разума: ' + verdict,
+                input_tokens=result['input_tokens'], output_tokens=result['output_tokens']
+            )
+            self.mark_ai_success()
+            self.dragon_log_action(
+                'experiment', str(row['id']), 'Эксперимент Разума завершён',
+                {'verdict': verdict, 'lesson': lesson[:500], 'confidence_after': after}
+            )
+            if verdict == 'refuted':
+                self.dragon_notify(
+                    'warning', 'Гипотеза опровергнута', row['hypothesis'][:300],
+                    action='experiment', category='important',
+                    group_key='experiment:' + str(row['id'])
+                )
+            return {'id': row['id'], 'status': 'done', 'verdict': verdict}
+        except Exception as exc:
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE brain_experiments SET status='error',actual_result=?,"
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (str(exc)[:3000], row['id'])
+                )
+            logging.warning('Brain experiment %s failed: %s', row['id'], exc)
+            return {'id': row['id'], 'status': 'error', 'error': str(exc)}
+
+    def brain_lab_state(self):
+        return {
+            'context': self.work_context(),
+            'experiments': self.brain_experiments(40),
+        }
 
     def reasoning_state(self, limit=30):
         config = self.ai_config()
