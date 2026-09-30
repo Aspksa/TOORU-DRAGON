@@ -440,6 +440,132 @@ class Storage:
                 break
         return result
 
+    def brain_suggestions(self, status='pending', limit=30):
+        if status not in {'pending', 'accepted', 'rejected', 'all'}:
+            raise ValueError('Неизвестный статус предложений.')
+        query = ('SELECT id,kind,title,body,topic,question,reason,confidence,status,'
+                 'source_message_id,created_at,decided_at FROM brain_suggestions')
+        params = []
+        if status != 'all':
+            query += ' WHERE status=?'
+            params.append(status)
+        query += ' ORDER BY id DESC LIMIT ?'
+        params.append(max(1, min(int(limit), 100)))
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(query, params)]
+
+    @staticmethod
+    def _parse_brain_json(text):
+        if not isinstance(text, str):
+            return []
+        clean = text.strip()
+        if clean.startswith('```'):
+            clean = re.sub(r'^```(?:json)?\s*|\s*```$', '', clean, flags=re.I | re.S).strip()
+        try:
+            data = json.loads(clean)
+        except (ValueError, TypeError):
+            start, end = clean.find('{'), clean.rfind('}')
+            if start < 0 or end <= start:
+                return []
+            try:
+                data = json.loads(clean[start:end + 1])
+            except (ValueError, TypeError):
+                return []
+        suggestions = data.get('suggestions', []) if isinstance(data, dict) else []
+        return suggestions if isinstance(suggestions, list) else []
+
+    def brain_reflect(self, user_text, assistant_text, source_message_id):
+        if self.usage_summary()['blocked']:
+            return []
+        prompt = (
+            'Проанализируй только этот обмен пользователя с Тори. '
+            'Верни только JSON вида {"suggestions":[...]}, максимум 3 элемента. '
+            'Допустимые kind: memory, knowledge, learning. '
+            'memory — только устойчивый личный факт или предпочтение, явно сказанное пользователем; '
+            'knowledge — полезный долговременный материал из ответа, который стоит сохранить; '
+            'learning — пробел или тема, которую стоит дополнительно изучить. '
+            'Для memory/knowledge нужны title и body. Для learning нужны topic и question. '
+            'Для всех нужны reason и confidence от 0 до 1. Не предлагай пустые или дублирующие вещи.\n\n'
+            'Пользователь:\n' + user_text[:6000] + '\n\nТори:\n' + assistant_text[:8000]
+        )
+        try:
+            result = call_yandex_ai(self, prompt, max_output_tokens=500, purpose='reflection')
+        except Exception as exc:
+            logging.warning('Brain reflection failed: %s', exc)
+            return []
+        self.add_ai_message('brain', 'system', 'Самоанализ диалога',
+                            input_tokens=result['input_tokens'], output_tokens=result['output_tokens'])
+        parsed = self._parse_brain_json(result['text'])
+        created = []
+        with self.connect() as db:
+            for raw in parsed[:3]:
+                if not isinstance(raw, dict):
+                    continue
+                kind = raw.get('kind')
+                if kind not in {'memory', 'knowledge', 'learning'}:
+                    continue
+                title = str(raw.get('title') or '').strip()[:300]
+                body = str(raw.get('body') or '').strip()[:20000]
+                topic = str(raw.get('topic') or '').strip()[:300]
+                question = str(raw.get('question') or '').strip()[:8000]
+                reason = str(raw.get('reason') or '').strip()[:1000]
+                try:
+                    confidence = max(0.0, min(float(raw.get('confidence', 0)), 1.0))
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                if kind in {'memory', 'knowledge'} and (not title or not body):
+                    continue
+                if kind == 'learning' and (not topic or not question):
+                    continue
+                duplicate = db.execute(
+                    "SELECT 1 FROM brain_suggestions WHERE status='pending' AND kind=? "
+                    "AND lower(title)=lower(?) AND lower(topic)=lower(?) AND lower(question)=lower(?) LIMIT 1",
+                    (kind, title, topic, question)
+                ).fetchone()
+                if duplicate:
+                    continue
+                cursor = db.execute(
+                    'INSERT INTO brain_suggestions(kind,title,body,topic,question,reason,confidence,source_message_id) '
+                    'VALUES (?,?,?,?,?,?,?,?)',
+                    (kind, title, body, topic, question, reason, confidence, source_message_id)
+                )
+                created.append(cursor.lastrowid)
+        return created
+
+    def decide_brain_suggestion(self, item):
+        suggestion_id = item.get('id')
+        action = item.get('action')
+        if type(suggestion_id) is not int or action not in {'accept', 'reject'}:
+            raise ValueError('Некорректное действие с предложением.')
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM brain_suggestions WHERE id=? AND status='pending'",
+                (suggestion_id,)
+            ).fetchone()
+            if not row:
+                raise ValueError('Предложение уже обработано или не найдено.')
+            row = dict(row)
+            if action == 'reject':
+                db.execute(
+                    "UPDATE brain_suggestions SET status='rejected',decided_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (suggestion_id,)
+                )
+                return {'ok': True, 'status': 'rejected'}
+        if row['kind'] in {'memory', 'knowledge'}:
+            with self.connect() as db:
+                db.execute(
+                    'INSERT INTO records(kind,title,body,source) VALUES (?,?,?,?)',
+                    (row['kind'], row['title'], row['body'], 'Тори · предложение из чата')
+                )
+        else:
+            self.learning_enqueue({'topic': row['topic'], 'question': row['question']})
+        with self.connect() as db:
+            db.execute(
+                "UPDATE brain_suggestions SET status='accepted',decided_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (suggestion_id,)
+            )
+        return {'ok': True, 'status': 'accepted'}
+
     def chat_state(self):
         config = self.ai_config()
         return {
