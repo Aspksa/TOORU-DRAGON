@@ -226,6 +226,39 @@ class CoreTest(unittest.TestCase):
         self.assertNotIn('Эта запись не должна', call.call_args.args[1])
         self.assertEqual(chat['messages'][-1]['context'], [])
 
+    def test_usage_costs_and_monthly_budget_blocking(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+            'input_rub_per_1k': 0.2,
+            'output_rub_per_1k': 0.3,
+            'monthly_budget_rub': 0.01,
+        })
+        self.storage.add_ai_message('chat', 'tori', 'Ответ', input_tokens=1000, output_tokens=1000)
+        usage = self.storage.usage_summary()
+        self.assertAlmostEqual(usage['month']['cost_rub'], 0.5, places=3)
+        self.assertTrue(usage['blocked'])
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request('/api/chat/send', {'text': 'Не отправлять'})
+        self.assertEqual(error.exception.code, 400)
+        with self.storage.connect() as db:
+            db.execute("INSERT OR REPLACE INTO settings VALUES ('learning_mode','running')")
+        self.assertIsNone(self.storage.claim_learning())
+        self.assertEqual(self.storage.learning_state()['mode'], 'paused')
+
+    def test_zero_budget_disables_blocking(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+            'input_rub_per_1k': 0.2,
+            'output_rub_per_1k': 0.3,
+            'monthly_budget_rub': 0,
+        })
+        self.storage.add_ai_message('chat', 'tori', 'Ответ', input_tokens=500000, output_tokens=500000)
+        self.assertFalse(self.storage.usage_summary()['blocked'])
+
     def test_extract_response_text_handles_null_content(self):
         response = {
             'output_text': None,
@@ -252,6 +285,9 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Qwen3.6 35B', ui)
         self.assertIn('Память и знания', ui)
         self.assertIn('Использовано:', ui)
+        self.assertIn('Месяц', ui)
+        self.assertIn('Лимит в месяц', ui)
+        self.assertIn('0,2 ₽ вход / 0,3 ₽ выход', ui)
         self.assertIn('Повторить', ui)
         self.assertIn('Пропустить', ui)
         self.assertIn('Отменить', ui)
