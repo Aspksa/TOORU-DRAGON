@@ -826,7 +826,10 @@
         "refuted",
         "inconclusive"
       ],
-      "knowledge_rule": "lesson + confirmed/refuted + confidence_after >= 0.8"
+      "knowledge_rule": "lesson + confirmed/refuted + confidence_after >= 0.8",
+      "auto_daily_limit": 3,
+      "project_scan": "read-only, до 5 релевантных текстовых файлов, общий ограниченный объём",
+      "error_behavior": "ошибка журналируется, создаёт error notification и обновляет следующий шаг рабочего контекста"
     },
     "brain_ui": [
       "Рабочий контекст",
