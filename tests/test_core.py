@@ -382,6 +382,108 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(usage['month']['output_tokens'], 50)
         self.assertAlmostEqual(usage['month']['cost_rub'], 0.15, places=3)
 
+    def test_goal_planner_requires_explicit_step_actions(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        plan = {
+            'summary': 'Сначала изучить архитектуру, затем реализовать.',
+            'steps': [
+                {
+                    'title': 'Изучить очереди',
+                    'type': 'learning',
+                    'topic': 'Очереди задач',
+                    'question': 'Как надёжно проектировать очередь задач?',
+                    'reason': 'Нужно знание перед реализацией.',
+                },
+                {
+                    'title': 'Сделать прототип',
+                    'type': 'action',
+                    'topic': '',
+                    'question': '',
+                    'reason': 'Практический шаг.',
+                },
+            ],
+        }
+        with patch('app.call_yandex_ai', return_value={
+            'text': json.dumps(plan, ensure_ascii=False),
+            'input_tokens': 40, 'output_tokens': 60
+        }) as call:
+            result = self.request('/api/brain/goal', {
+                'title': 'Улучшить мозги Тори',
+                'description': 'Сделать планирование и обучение.'
+            })
+        self.assertEqual(call.call_args.kwargs['purpose'], 'planning')
+        self.assertEqual(len(result['goals']), 1)
+        goal = result['goals'][0]
+        self.assertEqual(len(goal['plan']), 2)
+        self.assertEqual(self.request('/api/learning/status')['queue'], [])
+
+        self.request('/api/brain/goal/action', {
+            'id': goal['id'], 'action': 'queue_learning', 'step': 0
+        })
+        queue = self.request('/api/learning/status')['queue']
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]['topic'], 'Очереди задач')
+
+        self.request('/api/brain/goal/action', {
+            'id': goal['id'], 'action': 'complete_step', 'step': 1
+        })
+        state = self.request('/api/state')
+        goal = state['chat']['goals'][0]
+        self.assertEqual(goal['plan'][0]['status'], 'queued')
+        self.assertEqual(goal['plan'][1]['status'], 'done')
+
+    def test_learning_self_review_is_saved_and_gaps_need_approval(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        queued = self.request('/api/learning/queue', {
+            'topic': 'SQLite',
+            'question': 'Когда использовать WAL?'
+        })
+        self.request('/api/learning/control', {'action': 'start'})
+        item = self.storage.claim_learning()
+        self.assertEqual(item['id'], queued['id'])
+
+        review_json = {
+            'verdict': 'partial',
+            'confidence': 0.72,
+            'summary': 'Ответ полезный, но не разобраны ограничения WAL.',
+            'gaps': [{
+                'topic': 'SQLite WAL',
+                'question': 'Какие ограничения и недостатки есть у WAL?',
+                'reason': 'Нужно понять границы применения.'
+            }]
+        }
+        with patch('app.call_yandex_ai', return_value={
+            'text': json.dumps(review_json, ensure_ascii=False),
+            'input_tokens': 25, 'output_tokens': 30
+        }) as call:
+            review = self.storage.review_learning_answer(
+                'SQLite', 'Когда использовать WAL?', 'WAL полезен при параллельном чтении.'
+            )
+        self.assertEqual(call.call_args.kwargs['purpose'], 'review')
+        self.assertEqual(review['verdict'], 'partial')
+
+        self.assertTrue(self.storage.complete_learning(
+            queued['id'], 'WAL полезен при параллельном чтении.', 100, 50, review
+        ))
+        state = self.request('/api/learning/status')
+        task = next(x for x in state['queue'] if x['id'] == queued['id'])
+        self.assertEqual(task['review']['verdict'], 'partial')
+        self.assertAlmostEqual(task['review']['confidence'], 0.72, places=2)
+
+        suggestions = [x for x in state['suggestions'] if x['kind'] == 'learning']
+        self.assertEqual(len(suggestions), 1)
+        self.assertIn('ограничения', suggestions[0]['question'].lower())
+        # Самопроверка только предлагает следующий вопрос, не ставит его в очередь сама.
+        self.assertEqual(len(state['queue']), 1)
+
     def test_extract_response_text_handles_null_content(self):
         response = {
             'output_text': None,
@@ -415,6 +517,10 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Мозг: предложения', ui)
         self.assertIn('Принять', ui)
         self.assertIn('Отклонить', ui)
+        self.assertIn('Цели Тори', ui)
+        self.assertIn('Составить план', ui)
+        self.assertIn('Самопроверка:', ui)
+        self.assertIn('В обучение', ui)
         self.assertIn('Повторить', ui)
         self.assertIn('Пропустить', ui)
         self.assertIn('Отменить', ui)
@@ -461,14 +567,19 @@ class CoreTest(unittest.TestCase):
             self.assertIn('роутер', messages[0]['text'])
             self.assertIn('пакеты', messages[1]['text'])
 
-    def test_schema_v6_has_brain_suggestions(self):
+    def test_schema_v7_has_reasoning_tables(self):
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 6)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 7)
             columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
         self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens','context_json'} <= columns)
         with self.storage.connect() as db:
             brain_columns = {row[1] for row in db.execute('PRAGMA table_info(brain_suggestions)').fetchall()}
         self.assertTrue({'kind','title','body','topic','question','reason','confidence','status'} <= brain_columns)
+        with self.storage.connect() as db:
+            queue_columns = {row[1] for row in db.execute('PRAGMA table_info(learning_queue)').fetchall()}
+            goal_columns = {row[1] for row in db.execute('PRAGMA table_info(brain_goals)').fetchall()}
+        self.assertIn('review_json', queue_columns)
+        self.assertTrue({'title','description','status','plan_json','progress_json'} <= goal_columns)
 
     def test_duplicate_launcher_and_lock(self):
         lock = app.InstanceLock(Path(self.temp.name) / 'instance.lock')
