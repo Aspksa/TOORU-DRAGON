@@ -290,6 +290,69 @@ class CoreTest(unittest.TestCase):
         self.storage.add_ai_message('chat', 'tori', 'Ответ', input_tokens=500000, output_tokens=500000)
         self.assertFalse(self.storage.usage_summary()['blocked'])
 
+    def test_reasoning_engine_structures_decision_and_persists_visible_summary(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/records', {
+            'kind': 'knowledge',
+            'title': 'TOORU updater',
+            'body': 'Обновлятор работает через GitHub ZIP и сохраняет data/.',
+        })
+        payload = {
+            'summary': 'Нужно выбрать следующий модуль.',
+            'facts': ['Обновлятор уже работает.'],
+            'assumptions': ['Нужен следующий приоритет.'],
+            'options': [
+                {'title': 'Логика', 'pros': ['Повышает качество решений'], 'cons': ['Тратит токены']},
+                {'title': 'Мобильный доступ', 'pros': ['Удобство'], 'cons': ['Нужна авторизация']},
+            ],
+            'contradictions': ['Нельзя открывать сеть без авторизации.'],
+            'decision': 'Сначала развивать локальную логику.',
+            'confidence': 0.84,
+            'next_step': 'Добавить структурированный модуль анализа.',
+        }
+        with patch('app.call_yandex_ai', return_value={
+            'text': json.dumps(payload, ensure_ascii=False),
+            'input_tokens': 50,
+            'output_tokens': 40,
+        }) as call:
+            result = self.request('/api/brain/reason', {
+                'problem': 'Что развивать дальше в TOORU?',
+                'use_context': True,
+            })
+        self.assertEqual(call.call_args.kwargs['purpose'], 'reasoning')
+        self.assertEqual(result['items'][0]['result']['decision'], 'Сначала развивать локальную логику.')
+        self.assertAlmostEqual(result['items'][0]['result']['confidence'], 0.84, places=2)
+        self.assertEqual(result['items'][0]['context'][0]['title'], 'TOORU updater')
+        state = self.request('/api/state')
+        self.assertEqual(state['reasoning']['items'][0]['problem'], 'Что развивать дальше в TOORU?')
+        with self.storage.connect() as db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 8)
+
+    def test_reasoning_engine_handles_invalid_model_json_without_hidden_trace(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        with patch('app.call_yandex_ai', return_value={
+            'text': 'не json',
+            'input_tokens': 5,
+            'output_tokens': 2,
+        }):
+            result = self.request('/api/brain/reason', {
+                'problem': 'Проверить неизвестную задачу',
+                'use_context': False,
+            })
+        item = result['items'][0]
+        self.assertEqual(item['result']['facts'], [])
+        self.assertEqual(item['result']['assumptions'], [])
+        self.assertEqual(item['result']['decision'], '')
+        self.assertNotIn('analysis', json.dumps(item, ensure_ascii=False).lower())
+
     def test_brain_suggestions_require_user_approval(self):
         self.request('/api/ai/config', {
             'folder_id': 'b1gpcfme4j9b9bv37hqb',
