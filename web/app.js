@@ -18,21 +18,32 @@ async function reload(){
   document.getElementById('avatar').textContent=state.settings.name.slice(0,1).toUpperCase();
   document.getElementById('connection').textContent=state.ai_connected?'AI подключён':'Локально';
 }
-function basicSettings(profile){
-  return `<form id="settings-form" class="panel clean-form">
-    <span class="eyebrow">${profile?'Профиль':'Интерфейс'}</span>
-    <h2>${profile?'Личный кабинет':'Оформление'}</h2>
-    <label for="name">Имя</label>
-    <input id="name" name="name" maxlength="80" value="${escapeHtml(state.settings.name)}" required>
+function profilePanel(){
+  return `<div class="library-layout">
+    <form id="profile-form" class="panel clean-form">
+      <span class="eyebrow">Профиль</span><h2>Личный кабинет</h2>
+      <label for="name">Как к тебе обращаться</label>
+      <input id="name" name="name" maxlength="80" value="${escapeHtml(state.settings.name)}" required>
+      <button class="primary">Сохранить имя</button>
+    </form>
+    <section class="panel library-intro"><span class="eyebrow">Сводка</span><h2>Твоя TOORU</h2>
+      <p>Локальная память, проекты и обучение хранятся на этом устройстве.</p>
+      <div class="profile-stats"><span><strong>${state.counts.memory||0}</strong> память</span><span><strong>${state.counts.knowledge||0}</strong> знания</span><span><strong>${(state.counts.work||0)+(state.counts.home||0)}</strong> проекты</span></div>
+    </section>
+  </div>`;
+}
+function appearanceSettings(){
+  return `<form id="appearance-form" class="panel clean-form">
+    <span class="eyebrow">Интерфейс</span><h2>Оформление</h2>
     <label for="theme">Тема</label>
     <select id="theme" name="theme"><option value="system">Как в системе</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select>
-    <button class="primary">Сохранить</button>
+    <button class="primary">Сохранить тему</button>
   </form>`;
 }
 function aiSettings(){
   const q=state.learning||{};
   return `<section class="panel settings-card">
-    <div class="section-head"><div><span class="eyebrow">Модель</span><h2>AI Studio</h2></div><span class="status-label ${q.last_success>0?'ok':''}">${!q.configured?'Не настроено':q.last_success>0?'Подключено':'Ключ сохранён'}</span></div>
+    <div class="section-head"><div><span class="eyebrow">Модель</span><h2>Yandex AI Studio</h2></div><span class="status-label ${q.last_success>0?'ok':''}">${!q.configured?'Не настроено':q.last_success>0?'Подключено':'Ключ сохранён'}</span></div>
     <form id="ai-config-form" class="clean-form">
       <label for="ai-folder">Каталог Yandex Cloud</label>
       <input id="ai-folder" name="folder_id" maxlength="64" value="${escapeHtml(q.folder_id||'')}" required>
@@ -149,8 +160,8 @@ function render(){
   document.querySelectorAll('nav button').forEach(b=>b.dataset.page===page?b.setAttribute('aria-current','page'):b.removeAttribute('aria-current'));
   document.getElementById('description').textContent='';
   if(page==='main')content.innerHTML=mainPanel();
-  else if(page==='profile'){content.innerHTML=basicSettings(true);content.querySelector('#theme').value=state.settings.theme}
-  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+basicSettings(false)+aiSettings()+'</div>';content.querySelector('#theme').value=state.settings.theme}
+  else if(page==='profile'){content.innerHTML=profilePanel()}
+  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+'</div>';content.querySelector('#theme').value=state.settings.theme}
   else if(page==='work')content.innerHTML=projectPanel('work','Рабочие проекты');
   else if(page==='home')content.innerHTML=projectPanel('home','Домашние проекты');
   else if(page==='ai'){
@@ -190,7 +201,8 @@ content.addEventListener('submit',async event=>{
   try{
     const values=Object.fromEntries(new FormData(f));
     if(f.id==='record-form')await api('records',{...values,kind:f.dataset.kind});
-    if(f.id==='settings-form')await api('settings',values);
+    if(f.id==='profile-form')await api('settings',{name:values.name,theme:state.settings.theme});
+    if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
     if(f.id==='learning-queue-form')await api('learning/queue',values);
     if(f.id==='chat-form'){await api('chat/send',{text:values.text});f.reset()}
