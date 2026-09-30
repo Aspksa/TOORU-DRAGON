@@ -232,6 +232,16 @@ function learningPanel(){
     </div>
     <div id="learning-usage">${usageStrip(q.usage,'learning')}</div>
     <div class="learning-controls"><div class="segmented"><button class="action mode-button" data-learning-control="start" ${startDisabled}>▶ Начать</button><button class="action mode-button" data-learning-control="pause" ${pauseDisabled}>Ⅱ Пауза</button><button class="action mode-button" data-learning-control="stop" ${stopDisabled}>■ Стоп</button></div><span class="hint">Зависшие задачи отмечаются автоматически.</span></div>
+    <form id="brain-automation-form" class="panel clean-form">
+      <span class="eyebrow">Мозг Тори · v2</span><h3>Самообучение через Qwen</h3>
+      <label class="context-toggle"><input type="checkbox" name="enabled" value="1" ${q.automation?.enabled?'checked':''}> Автоматически продолжать полезные учебные цепочки</label>
+      <div class="budget-fields">
+        <label>Минимальная уверенность<input name="min_confidence" type="number" min="0.50" max="0.95" step="0.05" value="${q.automation?.min_confidence??0.75}"></label>
+        <label>Лимит задач в день<input name="daily_limit" type="number" min="1" max="20" step="1" value="${q.automation?.daily_limit??5}"></label>
+      </div>
+      <button class="primary" type="submit">Сохранить самообучение</button>
+      <p class="hint">Сегодня автоматически добавлено: ${q.automation?.today_count||0} из ${q.automation?.daily_limit||5}. Автоматизация принимает только предложения типа «обучение». Память и личные факты остаются под твоим подтверждением.</p>
+    </form>
   </section>
   <section class="conversation-shell learning-chat"><div class="conversation-head"><div><span class="eyebrow">Живой журнал</span><h2>Разговор обучения</h2></div><span class="status-label">${(q.messages||[]).length} сообщений</span></div><div class="chat-stream" id="learning-chat-stream">${learningConversation(q)}</div></section>
   <div class="learning-columns">
@@ -304,6 +314,7 @@ content.addEventListener('submit',async event=>{
     if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
     if(f.id==='learning-queue-form')await api('learning/queue',values);
+    if(f.id==='brain-automation-form')await api('brain/automation',{enabled:values.enabled==='1',min_confidence:Number(values.min_confidence),daily_limit:Number(values.daily_limit)});
     if(f.id==='goal-form')await api('brain/goal',values);
     if(f.id==='chat-form'){await api('chat/send',{text:values.text,use_context:values.use_context==='1',analyze:values.analyze==='1'});f.reset();for(const name of ['use_context','analyze']){const toggle=f.querySelector('[name="'+name+'"]');if(toggle)toggle.checked=true}}
     await reload();render();
