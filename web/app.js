@@ -43,14 +43,16 @@ function appearanceSettings(){
 function aiSettings(){
   const q=state.learning||{};
   return `<section class="panel settings-card">
-    <div class="section-head"><div><span class="eyebrow">Модель</span><h2>Yandex AI Studio</h2></div><span class="status-label ${q.last_success>0?'ok':''}">${!q.configured?'Не настроено':q.last_success>0?'Подключено':'Ключ сохранён'}</span></div>
+    <div class="section-head"><div><span class="eyebrow">Модель</span><h2>Yandex AI Studio</h2></div><span class="status-label ${q.last_success>0?'ok':''}">${!q.configured?'Не настроено':q.last_success>0?'Подключено':'Авторизация не проверена'}</span></div>
     <form id="ai-config-form" class="clean-form">
       <label for="ai-folder">Каталог Yandex Cloud</label>
       <input id="ai-folder" name="folder_id" maxlength="64" value="${escapeHtml(q.folder_id||'')}" required>
       <label for="ai-model">Модель</label>
       <input id="ai-model" name="model" maxlength="120" value="${escapeHtml(q.model||'')}" required>
-      <label for="ai-key">API-ключ</label>
-      <input id="ai-key" name="api_key" type="password" maxlength="500" autocomplete="off" placeholder="${q.configured?'Ключ сохранён — оставь пустым, чтобы не менять':'Вставь API-ключ'}">
+      <label for="ai-auth">Тип авторизации</label>
+      <select id="ai-auth" name="auth_type"><option value="api_key">API-ключ сервисного аккаунта</option><option value="iam_token">IAM-токен пользователя</option></select>
+      <label for="ai-key">Ключ / токен</label>
+      <input id="ai-key" name="api_key" type="password" maxlength="500" autocomplete="off" placeholder="${q.configured?'Секрет сохранён — оставь пустым, чтобы не менять':'Вставь API-ключ или IAM-токен'}">
       <div class="budget-fields">
         <label>Вход, ₽ / 1000 токенов<input name="input_rub_per_1k" type="number" min="0" max="1000" step="0.01" value="${q.usage?.input_rub_per_1k??0.2}"></label>
         <label>Выход, ₽ / 1000 токенов<input name="output_rub_per_1k" type="number" min="0" max="1000" step="0.01" value="${q.usage?.output_rub_per_1k??0.3}"></label>
@@ -60,6 +62,7 @@ function aiSettings(){
       <p class="hint">0 ₽ в поле лимита отключает блокировку. Текущий тариф Qwen3.6 35B: 0,2 ₽ вход / 0,3 ₽ выход за 1000 токенов.</p>
     </form>
   </section>`;
+
 }
 function recordList(kind,emptyText){
   const rows=state.records[kind]||[];
@@ -175,7 +178,7 @@ function learningPanel(){
   return `<section class="learning-shell">
     <div class="learning-hero"><div><span class="eyebrow">Автоматическое обучение</span><h2>Тори ↔ Qwen</h2><p>Здесь видно весь учебный диалог: что Тори спрашивает и что Qwen отвечает.</p></div><span class="model-pill">Qwen3.6 35B</span></div>
     <div class="learning-statusbar compact-status">
-      <div class="status-chip"><i class="status-dot ${q.last_success>0?'is-on':q.configured?'is-warn':'is-off'}"></i><span>AI</span><strong>${q.last_success>0?'Подключён':q.configured?'Ключ сохранён':'Не настроен'}</strong></div>
+      <div class="status-chip"><i class="status-dot ${q.last_success>0?'is-on':q.configured?'is-warn':'is-off'}"></i><span>AI</span><strong>${q.last_success>0?'Подключён':q.configured?'Авторизация не проверена':'Не настроен'}</strong></div>
       <div class="status-chip"><i class="status-dot ${q.mode==='running'?'is-on':q.mode==='paused'?'is-warn':'is-off'}"></i><span>Режим</span><strong id="learning-status">${modeText}</strong></div>
       <div class="status-chip"><i class="status-dot is-idle"></i><span>Очередь</span><strong id="queue-status">${active}</strong></div>
       <div class="status-chip"><i class="status-dot is-on"></i><span>Знания</span><strong id="memory-status">${q.knowledge_count||0}</strong></div>
@@ -206,7 +209,7 @@ function render(){
   document.getElementById('description').textContent='';
   if(page==='main')content.innerHTML=mainPanel();
   else if(page==='profile'){content.innerHTML=profilePanel()}
-  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+'</div>';content.querySelector('#theme').value=state.settings.theme}
+  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+'</div>';content.querySelector('#theme').value=state.settings.theme;const auth=content.querySelector('#ai-auth');if(auth)auth.value=state.learning?.auth_type||'api_key'}
   else if(page==='work')content.innerHTML=projectPanel('work','Рабочие проекты');
   else if(page==='home')content.innerHTML=projectPanel('home','Домашние проекты');
   else if(page==='ai'){

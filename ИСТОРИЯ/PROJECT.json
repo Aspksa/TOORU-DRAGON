@@ -224,7 +224,17 @@
       "https://aistudio.yandex.ru/ru/docs/ai-studio/quickstart/",
       "https://aistudio.yandex.ru/ru/docs/ai-studio/api/Responses/",
       "https://aistudio.yandex.ru/ru/docs/ai-studio/concepts/generation/models"
-    ]
+    ],
+    "auth": {
+      "supported": [
+        "API-ключ сервисного аккаунта",
+        "IAM-токен пользователя"
+      ],
+      "api_key_header": "Authorization: Api-Key <secret>",
+      "iam_header": "Authorization: Bearer <token>",
+      "verification_status": "Сохранённый секрет не считается подключением до успешного API-запроса.",
+      "troubleshooting_401": "Проверить тип авторизации, срок действия, область действия и права."
+    }
   },
   "implementation": {
     "working": [
@@ -332,7 +342,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "Tori Brain v1 реализован; финальный Windows CI после документации ожидается.",
+    "current_change_tests": "Yandex auth diagnostics v1 реализован; финальный Windows CI ожидается.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
@@ -374,7 +384,7 @@
   "next_steps": [
     {
       "priority": 1,
-      "task": "Проверить на пользовательском Windows живой чат: после ответа должны появляться предложения Мозга Тори, которые корректно принимаются/отклоняются."
+      "task": "На пользовательском Windows выбрать правильный тип авторизации, сохранить действующий секрет и нажать «Проверить связь»."
     },
     {
       "priority": 2,
