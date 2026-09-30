@@ -2033,6 +2033,10 @@ class Storage:
         title = item.get('title', '')
         action_type = item.get('action_type', 'note')
         payload = item.get('payload', {})
+        plan = item.get('plan', [])
+        source_kind = item.get('source_kind', 'manual')
+        source_message_id = item.get('source_message_id')
+        requires_decision = item.get('requires_decision', False) is True
         if not isinstance(title, str) or not 1 <= len(title.strip()) <= 300:
             raise ValueError('Название задачи должно содержать от 1 до 300 символов.')
         allowed = {'note','project_scan','file_read','file_write','database_backup','update_check'}
@@ -2040,19 +2044,48 @@ class Storage:
             raise ValueError('Такой навык пока нельзя ставить в очередь.')
         if not isinstance(payload, dict):
             raise ValueError('Параметры задачи должны быть объектом.')
+        if not isinstance(plan, list):
+            plan = []
+        normalized_plan = []
+        for step in plan[:8]:
+            if isinstance(step, str):
+                text = step.strip()
+            elif isinstance(step, dict):
+                text = str(step.get('title') or step.get('step') or '').strip()
+            else:
+                text = ''
+            if text:
+                normalized_plan.append({'title': text[:300], 'status': 'pending'})
+        if source_kind not in {'manual','chat','brain','system'}:
+            source_kind = 'manual'
+        if type(source_message_id) is not int:
+            source_message_id = None
         mode = self.dragon_mode()
-        status = 'suggested' if mode == 'suggest' else 'pending'
-        if mode == 'observe':
-            status = 'suggested'
+        status = 'suggested' if mode in {'observe','suggest'} or requires_decision else 'pending'
         with self.connect() as db:
             cursor = db.execute(
-                'INSERT INTO dragon_tasks(title,action_type,payload_json,status) VALUES (?,?,?,?)',
-                (title.strip(), action_type, json.dumps(payload, ensure_ascii=False), status)
+                'INSERT INTO dragon_tasks(title,action_type,payload_json,plan_json,status,'
+                'source_kind,source_message_id,requires_decision) VALUES (?,?,?,?,?,?,?,?)',
+                (title.strip(), action_type, json.dumps(payload, ensure_ascii=False),
+                 json.dumps(normalized_plan, ensure_ascii=False), status,
+                 source_kind, source_message_id, 1 if requires_decision else 0)
             )
             task_id = cursor.lastrowid
-        self.dragon_log_action('task', str(task_id), 'Создана задача Дракончика',
-                               {'title': title.strip(), 'action_type': action_type, 'status': status})
-        return {'id': task_id, 'status': status}
+        details = {'title': title.strip(), 'action_type': action_type, 'status': status,
+                   'source_kind': source_kind, 'requires_decision': requires_decision,
+                   'plan_steps': len(normalized_plan)}
+        self.dragon_log_action('task', str(task_id), 'Создана задача Дракончика', details)
+        if requires_decision:
+            self.dragon_notify(
+                'warning', 'Требуется решение', title.strip(),
+                action='task', category='decision', group_key=f'task:{task_id}'
+            )
+        elif source_kind == 'chat':
+            self.dragon_notify(
+                'info', 'Поручение добавлено', title.strip(),
+                action='task', category='important', group_key=f'task:{task_id}'
+            )
+        return {'id': task_id, 'status': status, 'requires_decision': requires_decision}
 
     def dragon_task_action(self, item):
         task_id, action = item.get('id'), item.get('action')
@@ -2082,7 +2115,7 @@ class Storage:
         with self.connect() as db:
             if force_id is None:
                 row = db.execute(
-                    "SELECT * FROM dragon_tasks WHERE status='pending' ORDER BY id LIMIT 1"
+                    "SELECT * FROM dragon_tasks WHERE status='pending' AND requires_decision=0 ORDER BY id LIMIT 1"
                 ).fetchone()
             else:
                 row = db.execute(
@@ -2131,7 +2164,8 @@ class Storage:
                     (json.dumps(result, ensure_ascii=False), task['id'])
                 )
             self.dragon_log_action(task['action_type'], str(task['id']), 'Задача Дракончика выполнена', result)
-            self.dragon_notify('success', 'Задача выполнена', task['title'], action='task')
+            self.dragon_notify('success', 'Задача выполнена', task['title'], action='task',
+                               category='completed', group_key='task:' + str(task['id']))
             return {'id': task['id'], 'status': 'done'}
         except Exception as exc:
             with self.connect() as db:
@@ -2141,7 +2175,8 @@ class Storage:
                 )
             self.dragon_log_action(task['action_type'], str(task['id']), 'Ошибка задачи Дракончика',
                                    {'error': str(exc)}, status='error')
-            self.dragon_notify('error', 'Ошибка задачи', str(exc), action='task')
+            self.dragon_notify('error', 'Ошибка задачи', str(exc), action='task',
+                               category='error', group_key='task:' + str(task['id']))
             return {'id': task['id'], 'status': 'error'}
 
     def dragon_activity(self, days=14):
