@@ -20,11 +20,11 @@
   },
   "project": {
     "name": "TOORU · DRAGON",
-    "version": "0.0.0",
+    "version": "0.0.1",
     "repository": "https://github.com/Aspksa/TOORU-DRAGON",
     "branch": "main",
-    "code_baseline_commit": "3c2d92c12c6550185736bf79f9b7e4537cfbe4d2",
-    "stage": "Дракончик Тоору v2: собственная очередь действий, режимы автономности, навыки, проводник, активность и голосовой слой.",
+    "code_baseline_commit": "b09510e3f286832fb5ec6514b2e6e7190d739b0b",
+    "stage": "Релиз 0.0.1: единое версионирование, защита интерфейса от старого кеша, исправления CSS/CSP и стабилизированный центр Дракончика Тоору.",
     "goal": "Личный помощник Тори с долговременной памятью, домашними и рабочими проектами, позднее мобильным доступом и обучением."
   },
   "architecture": {
@@ -54,6 +54,10 @@
       {
         "id": "profile",
         "label": "Личный кабинет"
+      },
+      {
+        "id": "dragon",
+        "label": "Дракончик Тоору"
       },
       {
         "id": "main",
@@ -94,9 +98,8 @@
     ],
     "ai_tabs": [
       "Чат",
-      "Память",
-      "Знания",
-      "Обучение"
+      "Мозг",
+      "Данные"
     ],
     "learning_ui": {
       "layout": "Лента диалога Тори ↔ Qwen + компактная очередь",
@@ -126,14 +129,18 @@
   "storage": {
     "database": "data/tooru.sqlite3",
     "engine": "SQLite",
-    "schema_version": 7,
+    "schema_version": 10,
     "tables": [
       "settings",
       "records",
       "learning_queue",
       "ai_messages",
       "brain_suggestions",
-      "brain_goals"
+      "brain_goals",
+      "brain_reasoning",
+      "dragon_notifications",
+      "dragon_actions",
+      "dragon_tasks"
     ],
     "record_kinds": [
       "work",
@@ -569,7 +576,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "AI response stability v1 реализован; финальный Windows CI ожидается.",
+    "current_change_tests": "Релиз 0.0.1 подготовлен; Windows CI будет зафиксирован после PR.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
@@ -696,5 +703,33 @@
       "result": "После обновления локальная ревизия совпала с GitHub; повторная проверка показала отсутствие новых изменённых файлов.",
       "next_main_revision": "07e66e05331a7f59ac8301618654ffa669bc76b3"
     }
+  },
+  "release_001": {
+    "version": "0.0.1",
+    "version_source": "VERSION",
+    "manifest": "RELEASE.json",
+    "changelog": "CHANGELOG.md",
+    "components": [
+      "Ядро",
+      "Интерфейс",
+      "Мозг",
+      "Дракончик Тоору",
+      "Обновлятор",
+      "Схема БД"
+    ],
+    "cache_protection": [
+      "app.js/style.css получают hash query ?v=<asset_revision>",
+      "HTML содержит version/build meta",
+      "API fetch использует cache=no-store",
+      "сервер отдаёт no-store/no-cache/must-revalidate",
+      "клиент сравнивает server version/build и показывает принудительную перезагрузку"
+    ],
+    "ui_fixes": [
+      "исправлена неопределённая CSS-переменная --border",
+      "убраны inline-style, блокировавшиеся CSP",
+      "исправлены дублирующиеся id Памяти/Знаний",
+      "Дракончик разбит на Обзор/Задачи/Проект/Права",
+      "фоновые обновления Дракончика стали точечными без полной перерисовки"
+    ]
   }
 }

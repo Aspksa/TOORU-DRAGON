@@ -67,6 +67,64 @@ class CoreTest(unittest.TestCase):
             self.request('/api/records', {'kind':'wrong', 'title':'Тест'})
         self.assertEqual(error.exception.code, 400)
 
+    def test_release_001_version_and_cache_busted_assets(self):
+        self.assertEqual(app.VERSION, '0.0.1')
+        self.assertIn('meta name="tooru-version" content="0.0.1"', self.html)
+        self.assertRegex(self.html, r'/app\.js\?v=[0-9a-f]{12}')
+        self.assertRegex(self.html, r'/style\.css\?v=[0-9a-f]{12}')
+        release = self.request('/api/release')
+        self.assertEqual(release['version'], '0.0.1')
+        self.assertEqual(len(release['asset_revision']), 12)
+        self.assertEqual(release['release']['components']['dragon']['version'], '0.0.1')
+
+        request = urllib.request.Request(self.url + '/app.js?v=' + release['asset_revision'])
+        with urllib.request.urlopen(request) as response:
+            body = response.read().decode('utf-8')
+            cache = response.headers.get('Cache-Control', '')
+            pragma = response.headers.get('Pragma', '')
+        self.assertIn("'use strict'", body)
+        self.assertIn('no-store', cache)
+        self.assertIn('no-cache', cache)
+        self.assertIn('must-revalidate', cache)
+        self.assertEqual(pragma, 'no-cache')
+
+    def test_ui_has_no_csp_blocked_inline_styles_and_has_refresh_fallback(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
+        self.assertNotIn('style="', ui)
+        self.assertIn('<progress max="100"', ui)
+        self.assertIn("class=\"level-'+level+'\"", ui)
+        self.assertIn('hardReload()', ui)
+        self.assertIn('Интерфейс устарел.', ui)
+        self.assertIn('.build-mismatch', css)
+        self.assertIn('.dragon-subtabs', css)
+
+    def test_ui_css_variables_and_combined_data_ids_are_consistent(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
+        definitions = set(re.findall(r'(--[A-Za-z0-9_-]+)\\s*:', css))
+        usages = set(re.findall(r'var\\((--[A-Za-z0-9_-]+)\\)', css))
+        self.assertEqual(usages - definitions, set())
+        library_start = ui.index('function libraryPanel(')
+        library_end = ui.index('function projectPanel(', library_start)
+        library = ui[library_start:library_end]
+        self.assertIn('id="${kind}-record-title"', library)
+        self.assertIn('id="${kind}-record-body"', library)
+        self.assertNotIn('id="record-title"', library)
+        self.assertNotIn('id="record-body"', library)
+
+    def test_dragon_center_is_split_into_stable_internal_tabs(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        self.assertIn("const tabs={overview:'Обзор',tasks:'Задачи',project:'Проект',rights:'Права'}", ui)
+        self.assertIn("data-dragon-tab=", ui)
+        refresh_start = ui.index('async function refreshDragonNotifications')
+        refresh_end = ui.index('function mainPanel', refresh_start)
+        refresh = ui[refresh_start:refresh_end]
+        self.assertNotIn('render();', refresh)
+        self.assertIn("getElementById('dragon-current')", refresh)
+        self.assertIn("getElementById('dragon-tasks')", refresh)
+        self.assertIn('Проводник проекта', ui)
+
     def test_local_security_and_private_files(self):
         for headers in ({}, {'X-Tooru-Token': self.token, 'Origin':'https://example.com'},
                         {'X-Tooru-Token': self.token, 'Host':'example.com'}):
@@ -1107,7 +1165,7 @@ class CoreTest(unittest.TestCase):
     def test_dragon_ui_has_permissions_and_popup_notifications(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
         css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
-        self.assertIn('<h2>Права</h2>', ui)
+        self.assertIn('<h2>Права Дракончика</h2>', ui)
         self.assertIn('Читать рабочий проект', ui)
         self.assertIn('Изменять файлы с резервной копией', ui)
         self.assertIn('Показывать всплывающие сообщения', ui)

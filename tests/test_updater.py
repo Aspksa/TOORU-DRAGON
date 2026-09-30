@@ -9,6 +9,10 @@ import updater
 
 
 class UpdaterTest(unittest.TestCase):
+    def test_updater_uses_product_version(self):
+        self.assertEqual(updater.UPDATER_VERSION, '0.0.1')
+        self.assertEqual(updater.USER_AGENT, 'TOORU-DRAGON-Updater/0.0.1')
+
     def test_protected_local_data_and_python_are_never_managed(self):
         self.assertFalse(updater.is_managed(Path('data/tooru.sqlite3')))
         self.assertFalse(updater.is_managed(Path('python/python.exe')))

@@ -1,7 +1,9 @@
 'use strict';
 const token=document.querySelector('meta[name="tooru-token"]').content;
+const clientVersion=document.querySelector('meta[name="tooru-version"]')?.content||'';
+const clientAssets=document.querySelector('meta[name="tooru-assets"]')?.content||'';
 const content=document.getElementById('content');
-let state,page='main',tab='chat';
+let state,page='main',tab='chat',dragonTab='overview';
 const labels={main:'Главная',profile:'Личный кабинет',dragon:'Дракончик Тоору',ai:'Tooru/Ai',work:'Рабочие проекты',home:'Домашние проекты',mobile:'Мобильное приложение',settings:'Настройки',updates:'Система обновления',diagnostics:'Система диагностики'};
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtDate=value=>{try{return new Date(value).toLocaleString('ru-RU')}catch(_e){return ''}};
@@ -26,16 +28,34 @@ function updateStatusMarkup(u){
   return last+files+history;
 }
 async function api(path,data){
-  const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:{'X-Tooru-Token':token,'Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});
+  const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',cache:'no-store',headers:{'X-Tooru-Token':token,'Content-Type':'application/json','Cache-Control':'no-cache'},body:data===undefined?undefined:JSON.stringify(data)});
   const result=await response.json();
   if(!response.ok)throw new Error(result.error||'Ошибка сервера');
   return result;
+}
+function hardReload(){
+  const url=new URL(location.href);
+  url.searchParams.set('ui',Date.now().toString());
+  location.replace(url.toString());
+}
+function buildMismatchBanner(){
+  let el=document.getElementById('build-mismatch');
+  if(el)return el;
+  el=document.createElement('div');
+  el.id='build-mismatch';
+  el.className='build-mismatch';
+  el.innerHTML='<strong>Интерфейс устарел.</strong><span>Сервер уже обновлён, а открытая страница использует старые файлы.</span><button>Обновить интерфейс без кеша</button>';
+  el.querySelector('button').addEventListener('click',hardReload);
+  document.body.appendChild(el);
+  return el;
 }
 async function reload(){
   state=await api('state');
   document.documentElement.style.colorScheme=state.settings.theme==='system'?'light dark':state.settings.theme;
   document.getElementById('avatar').textContent=state.settings.name.slice(0,1).toUpperCase();
   document.getElementById('connection').textContent=state.ai_connected?'AI подключён':'Локально';
+  const versionEl=document.getElementById('app-version');if(versionEl)versionEl.textContent='Версия '+state.version;
+  if((clientVersion&&state.version!==clientVersion)||(clientAssets&&state.asset_revision!==clientAssets))buildMismatchBanner();
   const dragonDot=document.getElementById('dragon-menu-status');
   if(dragonDot){const d=state.dragon||{};dragonDot.className='dragon-menu-status '+(d.current?'is-busy':(d.unread_notifications?'has-news':'is-idle'));dragonDot.title=d.current?'Дракончик работает':d.unread_notifications?'Есть новые сообщения':'Дракончик свободна'}
 }
@@ -60,6 +80,16 @@ function appearanceSettings(){
     <select id="theme" name="theme"><option value="system">Как в системе</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select>
     <button class="primary">Сохранить тему</button>
   </form>`;
+}
+function releasePanel(){
+  const r=state.release||{};
+  const components=r.components||{};
+  const cards=Object.values(components).map(x=>'<div class="release-component"><span>'+escapeHtml(x.label||'Модуль')+'</span><strong>'+escapeHtml(x.version||'—')+'</strong></div>').join('');
+  const changes=(r.changes||[]).map(x=>'<li>'+escapeHtml(x)+'</li>').join('');
+  return '<section class="panel release-panel"><div class="section-head"><div><span class="eyebrow">Версии</span><h2>TOORU '+escapeHtml(state.version||'')+'</h2></div><button class="action" type="button" data-hard-reload>Обновить UI без кеша</button></div>'+
+    '<div class="release-components">'+cards+'</div>'+
+    '<details><summary><strong>Что изменилось в этом релизе</strong></summary><ul class="release-changes">'+changes+'</ul></details>'+
+    '<p class="hint">Сборка интерфейса: '+escapeHtml(state.asset_revision||'—')+'</p></section>';
 }
 function aiSettings(){
   const q=state.learning||{};
@@ -98,8 +128,8 @@ function libraryPanel(kind,title,description,titleLabel,bodyLabel){
     <section class="panel library-intro"><span class="eyebrow">${kind==='memory'?'Личное':'База'}</span><h2>${title}</h2><p>${description}</p><strong class="big-count">${state.counts[kind]||0}</strong><span class="meta">записей</span></section>
     <form id="record-form-${kind}" data-kind="${kind}" class="panel clean-form">
       <h2>Добавить</h2>
-      <label for="record-title">${titleLabel}</label><input id="record-title" name="title" maxlength="300" required>
-      <label for="record-body">${bodyLabel}</label><textarea id="record-body" name="body" maxlength="20000"></textarea>
+      <label for="${kind}-record-title">${titleLabel}</label><input id="${kind}-record-title" name="title" maxlength="300" required>
+      <label for="${kind}-record-body">${bodyLabel}</label><textarea id="${kind}-record-body" name="body" maxlength="20000"></textarea>
       <button class="primary">Сохранить</button>
     </form>
   </div>
@@ -135,7 +165,7 @@ function usageStrip(usage,scope='all'){
     <div><span>${label}</span><strong>${Number(first.cost_rub||0).toFixed(2)} ₽</strong></div>
     <div><span>${scope==='all'?'Месяц':'Всего AI за месяц'}</span><strong>${(scope==='all'?spent:totalSpent).toFixed(2)} ₽${limit>0?' / '+limit.toFixed(0)+' ₽':''}</strong></div>
     <div><span>Токены ${scope==='all'?'':'раздела'}</span><strong>${Number(scoped.input_tokens||0)+Number(scoped.output_tokens||0)}</strong></div>
-    ${limit>0?`<div class="usage-progress"><i style="width:${pct}%"></i></div>`:''}
+    ${limit>0?`<div class="usage-progress"><progress max="100" value="${pct}" aria-label="Использование лимита"></progress></div>`:''}
   </div>`;
 }
 function brainSuggestionsMarkup(items){
@@ -368,16 +398,16 @@ function dragonActivityMarkup(d){
   const rows=d.activity||[];
   const max=Math.max(1,...rows.map(x=>Number(x.count)||0));
   return '<div class="dragon-activity">'+rows.map(x=>{
-    const height=Math.max(5,Math.round((Number(x.count)||0)/max*100));
-    return '<div class="dragon-day" title="'+escapeHtml(x.day)+' · '+String(x.count)+'"><i style="height:'+height+'%"></i><small>'+escapeHtml(x.day.slice(8))+'</small></div>';
+    const level=Math.max(0,Math.min(10,Math.ceil((Number(x.count)||0)/max*10)));
+    return '<div class="dragon-day" title="'+escapeHtml(x.day)+' · '+String(x.count)+'"><i class="level-'+level+'"></i><small>'+escapeHtml(x.day.slice(8))+'</small></div>';
   }).join('')+'</div>';
 }
 function dragonCurrentMarkup(d){
   const current=d.current;
-  if(current)return '<div class="dragon-current is-busy"><span class="pulse-dot"></span><div><strong>Сейчас выполняет</strong><p>'+escapeHtml(current.title)+'</p></div></div>';
+  if(current)return '<div id="dragon-current" class="dragon-current is-busy"><span class="pulse-dot"></span><div><strong>Сейчас выполняет</strong><p>'+escapeHtml(current.title)+'</p></div></div>';
   const waiting=(d.tasks||[]).find(t=>['pending','suggested'].includes(t.status));
-  if(waiting)return '<div class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Следующая задача</strong><p>'+escapeHtml(waiting.title)+'</p></div></div>';
-  return '<div class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Сейчас свободна</strong><p>Ждёт новую задачу.</p></div></div>';
+  if(waiting)return '<div id="dragon-current" class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Следующая задача</strong><p>'+escapeHtml(waiting.title)+'</p></div></div>';
+  return '<div id="dragon-current" class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Сейчас свободна</strong><p>Ждёт новую задачу.</p></div></div>';
 }
 function dragonModeControl(d){
   const names={observe:'Наблюдать',suggest:'Предлагать',execute:'Выполнять'};
@@ -387,42 +417,34 @@ function dragonFileList(files){
   if(!files?.length)return '<div class="empty-state">Нажми «Проводник проекта».</div>';
   return '<div class="dragon-file-list">'+files.slice(0,120).map(file=>'<button data-dragon-file="'+escapeHtml(file.path)+'"><span>▤</span><strong>'+escapeHtml(file.path)+'</strong><small>'+escapeHtml(formatBytes(file.size))+'</small></button>').join('')+'</div>';
 }
+function dragonOverview(d,q){
+  const enabled=Object.values(d.permissions||{}).filter(Boolean).length,total=Object.keys(d.permissions||{}).length;
+  const auto=q.automation?.enabled,queued=(d.tasks||[]).filter(t=>['pending','suggested','running'].includes(t.status)).length;
+  return '<section class="dragon-hero"><div class="dragon-emblem" aria-hidden="true">🐉</div><div class="dragon-hero-copy"><span class="eyebrow">Центр действий</span><h2>'+escapeHtml(d.name||'Дракончик Тоору')+'</h2><p>Состояние, активность и быстрые команды без перегруженной страницы.</p><div class="dragon-badges"><span class="status-label ok">'+enabled+' / '+total+' прав</span><span class="status-label '+(auto?'ok':'')+'">Мозг: '+(auto?'авто':'ручной')+'</span><span class="status-label">'+queued+' задач</span><span class="status-label">'+(d.unread_notifications||0)+' новых</span></div></div><button class="dragon-voice-button" data-dragon-speak title="Озвучить состояние">🔊</button></section>'+
+  dragonCurrentMarkup(d)+
+  '<div class="dragon-quick-grid"><button class="dragon-quick primary-card" data-go="ai" data-open-tab="brain"><span>✦</span><strong>Открыть Мозг</strong><small>Разум, цели и обучение</small></button><button class="dragon-quick" data-dragon-tab="tasks"><span>✓</span><strong>Задачи</strong><small>Очередь и режим работы</small></button><button class="dragon-quick" data-dragon-tab="project"><span>▤</span><strong>Проект</strong><small>Проводник и файлы</small></button><button class="dragon-quick" data-hard-reload><span>↻</span><strong>Обновить интерфейс</strong><small>Без кеша браузера</small></button></div>'+
+  '<div class="dragon-center-grid"><section class="panel"><div class="section-head"><div><span class="eyebrow">Активность</span><h2>14 дней</h2></div></div>'+dragonActivityMarkup(d)+'</section><section class="panel"><div class="section-head"><div><span class="eyebrow">Навыки</span><h2>Что умеет</h2></div></div><div class="dragon-skills">'+dragonSkillsMarkup(d)+'</div></section></div>'+
+  '<div class="dragon-center-grid"><section class="panel"><div class="section-head"><div><span class="eyebrow">События</span><h2>Уведомления</h2></div><button class="mini-action" data-dragon-read-all>Прочитано</button></div><div id="dragon-notifications">'+dragonNotificationsMarkup(d)+'</div></section><section class="panel"><div class="section-head"><div><span class="eyebrow">Лента</span><h2>Что Тоору делала</h2></div></div><div id="dragon-actions">'+dragonActionsMarkup(d)+'</div></section></div>';
+}
+function dragonTasksPanel(d){
+  const queued=(d.tasks||[]).filter(t=>['pending','suggested','running'].includes(t.status)).length;
+  return '<section class="panel dragon-mode-panel"><div class="section-head"><div><span class="eyebrow">Автономность</span><h2>Режим работы</h2></div><span class="status-label">'+queued+' активных</span></div>'+dragonModeControl(d)+'<p class="hint">Наблюдать — не запускать. Предлагать — формировать очередь. Выполнять — автоматически исполнять только разрешённые навыки.</p></section>'+
+  '<section class="panel"><div class="section-head"><div><span class="eyebrow">Очередь</span><h2>Задачи Дракончика</h2></div></div><form id="dragon-task-form" class="clean-form"><input name="title" maxlength="300" placeholder="Что поручить Дракончику?" required><select name="action_type"><option value="note">Заметка / задача</option><option value="project_scan">Проверить проект</option><option value="database_backup">Резервная копия</option><option value="update_check">Проверить обновление</option><option value="file_read">Прочитать файл</option><option value="file_write">Изменить файл</option></select><input name="path" maxlength="500" placeholder="Путь к файлу — если нужен"><textarea name="content" maxlength="60000" rows="3" placeholder="Новое содержимое — только для изменения файла"></textarea><div class="form-actions"><button class="primary">Добавить задачу</button><button type="button" class="action" data-dragon-mic>🎙 Голосом</button></div></form><div id="dragon-tasks">'+dragonTasksMarkup(d)+'</div></section>';
+}
+function dragonProjectPanel(){
+  return '<section class="panel dragon-project-state"><div class="section-head"><div><span class="eyebrow">Проект</span><h2>Проводник проекта</h2></div><button class="mini-action" data-dragon-explorer>Обновить список</button></div><div id="dragon-project-files">'+dragonFileList(window.dragonProjectFiles||[])+'</div><pre id="dragon-file-preview" class="dragon-file-preview">Выбери файл для просмотра.</pre></section>';
+}
+function dragonRightsPanel(d){
+  return '<section class="panel"><div class="section-head"><div><span class="eyebrow">Доступ</span><h2>Права Дракончика</h2></div><span class="dragon-shield">◆</span></div>'+dragonPermissionsForm()+'<p class="hint">Удаление файлов по умолчанию отключено. Изменение текстовых файлов проходит через резервную копию и журнал.</p></section>';
+}
 function dragonPanel(){
   const d=state.dragon||{name:'Дракончик Тоору',permissions:{},actions:[],notifications:[],tasks:[],skills:[],activity:[],unread_notifications:0,mode:'suggest'};
   const q=state.learning||{};
-  const enabled=Object.values(d.permissions||{}).filter(Boolean).length;
-  const total=Object.keys(d.permissions||{}).length;
-  const auto=q.automation?.enabled;
-  const queued=(d.tasks||[]).filter(t=>['pending','suggested','running'].includes(t.status)).length;
-  return '<section class="dragon-hero">'+
-    '<div class="dragon-emblem" aria-hidden="true">🐉</div>'+
-    '<div class="dragon-hero-copy"><span class="eyebrow">Центр действий</span><h2>'+escapeHtml(d.name||'Дракончик Тоору')+'</h2><p>Задачи, автономность, навыки, проект и активность в одном месте.</p>'+
-      '<div class="dragon-badges"><span class="status-label ok">'+enabled+' / '+total+' прав</span><span class="status-label '+(auto?'ok':'')+'">Мозг: '+(auto?'авто':'ручной')+'</span><span class="status-label">'+queued+' задач</span><span class="status-label">'+(d.unread_notifications||0)+' новых</span></div>'+
-    '</div><button class="dragon-voice-button" data-dragon-speak title="Озвучить состояние">🔊</button>'+
-  '</section>'+
-  dragonCurrentMarkup(d)+
-  '<section class="panel dragon-mode-panel"><div class="section-head"><div><span class="eyebrow">Автономность</span><h2>Режим работы</h2></div></div>'+dragonModeControl(d)+'<p class="hint">Наблюдать — ничего не запускать. Предлагать — формировать очередь. Выполнять — автоматически выполнять только разрешённые навыки.</p></section>'+
-  '<div class="dragon-quick-grid">'+
-    '<button class="dragon-quick primary-card" data-go="ai" data-open-tab="brain"><span>✦</span><strong>Открыть Мозг</strong><small>Разум, цели и обучение</small></button>'+
-    '<button class="dragon-quick" data-dragon-explorer><span>▤</span><strong>Проводник проекта</strong><small>Файлы и чтение</small></button>'+
-    '<button class="dragon-quick" data-dragon-quick-task="database_backup"><span>▣</span><strong>Задача: резервная копия</strong><small>Добавить в очередь</small></button>'+
-    '<button class="dragon-quick" data-dragon-quick-task="update_check"><span>↓</span><strong>Задача: обновления</strong><small>Добавить в очередь</small></button>'+
-  '</div>'+
-  '<div class="dragon-center-grid">'+
-    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Очередь</span><h2>Задачи Дракончика</h2></div><span class="status-label">'+queued+'</span></div>'+
-      '<form id="dragon-task-form" class="clean-form"><input name="title" maxlength="300" placeholder="Что поручить Дракончику?" required><select name="action_type"><option value="note">Заметка / задача</option><option value="project_scan">Проверить проект</option><option value="database_backup">Резервная копия</option><option value="update_check">Проверить обновление</option><option value="file_read">Прочитать файл</option><option value="file_write">Изменить файл</option></select><input name="path" maxlength="500" placeholder="Путь к файлу — если нужен"><textarea name="content" maxlength="60000" rows="3" placeholder="Новое содержимое — только для изменения файла"></textarea><div class="form-actions"><button class="primary">Добавить задачу</button><button type="button" class="action" data-dragon-mic>🎙 Голосом</button></div></form>'+
-      '<div id="dragon-tasks">'+dragonTasksMarkup(d)+'</div></section>'+
-    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Навыки</span><h2>Что умеет</h2></div></div><div class="dragon-skills">'+dragonSkillsMarkup(d)+'</div></section>'+
-  '</div>'+
-  '<div class="dragon-center-grid">'+
-    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Активность</span><h2>14 дней</h2></div></div>'+dragonActivityMarkup(d)+'</section>'+
-    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Доступ</span><h2>Права</h2></div><span class="dragon-shield">◆</span></div><details><summary>Показать права</summary>'+dragonPermissionsForm()+'</details></section>'+
-  '</div>'+
-  '<section class="panel dragon-project-state"><div class="section-head"><div><span class="eyebrow">Проводник</span><h2>Файлы проекта</h2></div><button class="mini-action" data-dragon-explorer>Обновить</button></div><div id="dragon-project-files">'+dragonFileList(window.dragonProjectFiles||[])+'</div><pre id="dragon-file-preview" class="dragon-file-preview">Выбери файл для просмотра.</pre></section>'+
-  '<div class="dragon-center-grid">'+
-    '<section class="panel"><div class="section-head"><div><span class="eyebrow">События</span><h2>Уведомления</h2></div><button class="mini-action" data-dragon-read-all>Прочитано</button></div><div id="dragon-notifications">'+dragonNotificationsMarkup(d)+'</div></section>'+
-    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Лента</span><h2>Что Тоору делала</h2></div></div><div id="dragon-actions">'+dragonActionsMarkup(d)+'</div></section>'+
-  '</div>';
+  const tabs={overview:'Обзор',tasks:'Задачи',project:'Проект',rights:'Права'};
+  if(!tabs[dragonTab])dragonTab='overview';
+  const nav='<div class="dragon-subtabs">'+Object.entries(tabs).map(([key,label])=>'<button class="'+(dragonTab===key?'is-active':'')+'" data-dragon-tab="'+key+'">'+label+'</button>').join('')+'</div>';
+  const body=dragonTab==='overview'?dragonOverview(d,q):dragonTab==='tasks'?dragonTasksPanel(d):dragonTab==='project'?dragonProjectPanel():dragonRightsPanel(d);
+  return nav+body;
 }
 function ensureDragonToastHost(){
   let host=document.getElementById('dragon-toast-host');
@@ -449,9 +471,11 @@ async function refreshDragonNotifications(){
     if(dragonDot){dragonDot.className='dragon-menu-status '+(d.current?'is-busy':(d.unread_notifications?'has-news':'is-idle'))}
     (d.notifications||[]).filter(n=>!n.is_read).slice(0,3).forEach(showDragonToast);
     if(page==='dragon'){
-      const active=document.activeElement;
-      const editing=active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName);
-      if(!editing)render();
+      const current=document.getElementById('dragon-current');
+      if(current){const wrap=document.createElement('div');wrap.innerHTML=dragonCurrentMarkup(d);current.replaceWith(wrap.firstElementChild)}
+      const notes=document.getElementById('dragon-notifications');if(notes)notes.innerHTML=dragonNotificationsMarkup(d);
+      const actions=document.getElementById('dragon-actions');if(actions)actions.innerHTML=dragonActionsMarkup(d);
+      const tasks=document.getElementById('dragon-tasks');if(tasks)tasks.innerHTML=dragonTasksMarkup(d);
     }
   }catch(_error){}
 }
@@ -459,8 +483,8 @@ function mainPanel(){
   const learning=state.learning||{};
   return `<section class="welcome"><span class="eyebrow">TOORU · DRAGON</span><h2>Добро пожаловать, ${escapeHtml(state.settings.name)}</h2><p>Один центр для общения, памяти, проектов и обучения Тори.</p></section>
   <div class="dashboard-grid">
-    <button class="dashboard-card primary-card" data-go="ai" data-open-tab="chat"><span>✦</span><strong>Поговорить с Тори</strong><small>${state.ai_connected?'AI подключён':'Настрой AI Studio'}</small></button>
-    <button class="dashboard-card" data-go="ai" data-open-tab="brain"><span>◎</span><strong>Мозг Тори</strong><small>${{running:'Работает',paused:'Пауза',stopped:'Остановлено'}[learning.mode]||'Остановлено'} · ${(learning.queue||[]).filter(x=>['pending','running'].includes(x.status)).length} в очереди</small></button>
+    <button class="dashboard-card primary-card" data-go="ai" data-open-tab="chat"><span>✦</span><strong>Поговорить с Дракончиком Тоору</strong><small>${state.ai_connected?'AI подключён':'Настрой AI Studio'}</small></button>
+    <button class="dashboard-card" data-go="ai" data-open-tab="brain"><span>◎</span><strong>Мозг Дракончика</strong><small>${{running:'Работает',paused:'Пауза',stopped:'Остановлено'}[learning.mode]||'Остановлено'} · ${(learning.queue||[]).filter(x=>['pending','running'].includes(x.status)).length} в очереди</small></button>
     <button class="dashboard-card" data-go="ai" data-open-tab="data"><span>◈</span><strong>Память и знания</strong><small>${state.counts.memory||0} память · ${state.counts.knowledge||0} знания</small></button>
     <button class="dashboard-card" data-go="work"><span>▣</span><strong>Проекты</strong><small>${(state.counts.work||0)+(state.counts.home||0)} всего</small></button>
   </div>`;
@@ -472,7 +496,7 @@ function render(){
   document.getElementById('description').textContent='';
   if(page==='main')content.innerHTML=mainPanel();
   else if(page==='profile'){content.innerHTML=profilePanel()}
-  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+'</div>';content.querySelector('#theme').value=state.settings.theme;const auth=content.querySelector('#ai-auth');if(auth)auth.value=state.learning?.auth_type||'api_key'}
+  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+releasePanel()+'</div>';content.querySelector('#theme').value=state.settings.theme;const auth=content.querySelector('#ai-auth');if(auth)auth.value=state.learning?.auth_type||'api_key'}
   else if(page==='dragon')content.innerHTML=dragonPanel()
   else if(page==='work')content.innerHTML=projectPanel('work','Рабочие проекты');
   else if(page==='home')content.innerHTML=projectPanel('home','Домашние проекты');
@@ -486,7 +510,7 @@ function render(){
     content.innerHTML=html;
     if(tab==='chat')scrollChat('chat-stream');
   }else if(page==='mobile')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">Позже</span><h2>Мобильное приложение</h2><p>Интерфейс уже адаптивный, но удалённое подключение пока отключено ради безопасности.</p></section>';
-  else if(page==='updates')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">GitHub → локально</span><h2>Система обновления</h2><p>Проверяет ветку main, сохраняет данные и переносимый Python, создаёт резервные копии и перезапускает TOORU после установки.</p><div class="form-actions"><button class="action" data-update-check>Проверить обновление</button><button class="primary" data-update-start>Обновить и перезапустить</button><button class="action" data-backup>Создать копию базы</button></div><div id="update-result" aria-live="polite"></div></section>';
+  else if(page==='updates')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">GitHub → локально</span><h2>Система обновления</h2><p>Текущая версия: <strong>'+escapeHtml(state.version)+'</strong>. Здесь видно, что изменилось и какие компоненты обновлены.</p><div class="form-actions"><button class="action" data-update-check>Проверить обновление</button><button class="primary" data-update-start>Обновить и перезапустить</button><button class="action" data-backup>Создать копию базы</button><button class="action" data-hard-reload>Обновить UI без кеша</button></div><div id="update-result" aria-live="polite"></div></section>'+releasePanel();
   else if(page==='diagnostics')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">Система</span><h2>Диагностика</h2><p>Проверка базы, Python, SQLite и подключения AI.</p><button class="primary" data-diagnose>Запустить проверку</button><div id="diagnostic-result" aria-live="polite"></div></section>';
 }
 function scrollChat(id){requestAnimationFrame(()=>{const el=document.getElementById(id);if(el)el.scrollTop=el.scrollHeight})}
@@ -497,6 +521,8 @@ content.addEventListener('click',async event=>{
   if(b.closest('form')&&b.type==='submit')return;
   if(b.dataset.go){if(b.dataset.openTab)tab=b.dataset.openTab;go(b.dataset.go);return}
   if(b.dataset.tab){tab=b.dataset.tab;render();return}
+  if(b.dataset.dragonTab){dragonTab=b.dataset.dragonTab;render();return}
+  if(b.hasAttribute('data-hard-reload')){hardReload();return}
   b.disabled=true;
   try{
     if(b.dataset.delete){if(!confirm('Удалить эту запись?'))return;await api('delete',{id:Number(b.dataset.delete)});await reload();render();message('Удалено.')}
