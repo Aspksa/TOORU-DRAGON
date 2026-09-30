@@ -68,14 +68,14 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 400)
 
     def test_release_001_version_and_cache_busted_assets(self):
-        self.assertEqual(app.VERSION, '0.0.1')
-        self.assertIn('meta name="tooru-version" content="0.0.1"', self.html)
+        self.assertEqual(app.VERSION, '0.0.2')
+        self.assertIn('meta name="tooru-version" content="0.0.2"', self.html)
         self.assertRegex(self.html, r'/app\.js\?v=[0-9a-f]{12}')
         self.assertRegex(self.html, r'/style\.css\?v=[0-9a-f]{12}')
         release = self.request('/api/release')
-        self.assertEqual(release['version'], '0.0.1')
+        self.assertEqual(release['version'], '0.0.2')
         self.assertEqual(len(release['asset_revision']), 12)
-        self.assertEqual(release['release']['components']['dragon']['version'], '0.0.1')
+        self.assertEqual(release['release']['components']['dragon']['version'], '0.0.2')
 
         request = urllib.request.Request(self.url + '/app.js?v=' + release['asset_revision'])
         with urllib.request.urlopen(request) as response:
@@ -124,6 +124,31 @@ class CoreTest(unittest.TestCase):
         self.assertIn("getElementById('dragon-current')", refresh)
         self.assertIn("getElementById('dragon-tasks')", refresh)
         self.assertIn('Проводник проекта', ui)
+
+    def test_release_002_has_unified_profile_settings_and_updater_design(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
+        release = json.loads((app.ROOT / 'RELEASE.json').read_text('utf-8'))
+        self.assertEqual(release['version'], '0.0.2')
+        for text_value in ('Персональная сводка TOORU', 'Задачи Тоору', 'Продолжить работу',
+                           "appearance:'Интерфейс'", "ai:'AI'", "versions:'Версии'",
+                           'Центр обновления', 'Проверяем состояние обновлений'):
+            self.assertIn(text_value, ui)
+        self.assertIn('loadUpdateCenter()', ui)
+        self.assertIn('update-summary-grid', ui)
+        self.assertIn('profile-metrics', ui)
+        self.assertIn('settings-tabs', ui)
+        self.assertIn('.profile-hero', css)
+        self.assertIn('.settings-hero', css)
+        self.assertIn('.update-hero', css)
+        self.assertIn('.update-summary-grid', css)
+
+    def test_dragon_popup_is_deduplicated_per_browser_session(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        self.assertIn('const shownDragonNotes=new Set()', ui)
+        self.assertIn('shownDragonNotes.has(note.id)', ui)
+        self.assertIn('shownDragonNotes.add(note.id)', ui)
+        self.assertIn('app-toast-host', ui)
 
     def test_local_security_and_private_files(self):
         for headers in ({}, {'X-Tooru-Token': self.token, 'Origin':'https://example.com'},
