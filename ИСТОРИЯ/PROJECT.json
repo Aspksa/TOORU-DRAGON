@@ -23,7 +23,7 @@
     "version": "0.0.0",
     "repository": "https://github.com/Aspksa/TOORU-DRAGON",
     "branch": "main",
-    "code_baseline_commit": "220fb5fc9b15c002ada40959d890f5f87ee52764",
+    "code_baseline_commit": "d57277b9470ea9724d77b7d4621c236962e097e9",
     "stage": "Рабочий каркас с прототипом Qwen-моста; собственная ИИ-модель ещё не подключена.",
     "goal": "Личный помощник Тори с долговременной памятью, домашними и рабочими проектами, позднее мобильным доступом и обучением."
   },
@@ -97,7 +97,18 @@
       "Память",
       "Знания",
       "Обучение"
-    ]
+    ],
+    "learning_ui": {
+      "layout": "Единый минималистичный рабочий центр",
+      "sections": [
+        "статусы",
+        "текущая сессия",
+        "очередь обучения",
+        "журнал обучения"
+      ],
+      "engine_brand_hidden": true,
+      "technical_clutter_hidden": true
+    }
   },
   "constraints": {
     "os": "Windows 10/11 x64",
@@ -168,7 +179,7 @@
     "model_selection": "Отложен по указанию пользователя 2026-09-30; характеристики оборудования сейчас не запрашивать."
   },
   "qwen_teacher": {
-    "status": "chrome_bridge_live_connected_ui_improved",
+    "status": "tori_browser_learning_center_implemented",
     "website": "https://chat.qwen.ai",
     "chosen_direction": "Браузер без ручного копирования ответов. API обсуждался как альтернатива, но не был принят основным способом.",
     "profile": "Отдельный профиль специально для Тори; существующий аккаунт Qwen допустим; пользователь выполняет вход.",
@@ -231,7 +242,10 @@
       "automation": true,
       "extension": "browser/qwen-bridge",
       "chrome_limit": "В официальном Chrome 137+ --load-extension удалён; требуется одноразовый Load unpacked в отдельном профиле.",
-      "auto_observe_on_open": true
+      "auto_observe_on_open": true,
+      "product_name": "Браузер Тори",
+      "implementation": "Изолированный профиль установленного Google Chrome; отдельный собственный Chromium/WebView пока не поставляется.",
+      "ui_exposes_engine": false
     },
     "live_verification": {
       "date": "2026-09-30",
@@ -254,7 +268,9 @@
       "Открытие Qwen в отдельном профиле Google Chrome",
       "Локальный WebExtension-мост Qwen: heartbeat, наблюдение, очередь, передача/возврат управления",
       "Сохранение ответов очереди Qwen в знания с URL источника и защитой от дублей",
-      "Наглядная панель состояния Chrome/моста/обучения/памяти с автообновлением каждые 2 секунды"
+      "Наглядная панель состояния Chrome/моста/обучения/памяти с автообновлением каждые 2 секунды",
+      "Браузер Тори как отдельная пользовательская сущность поверх изолированного Chrome-профиля",
+      "Оптимизированный экран обучения: текущая сессия, прогресс очереди, журнал и живые статусы без технического шума"
     ],
     "not_implemented": [
       "самостоятельное формирование тем и вопросов собственной ИИ-моделью",
@@ -319,7 +335,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "Windows CI на коммите 4501835093d5cf6247eccc871e97f3b4fc90d2d0: 9 интеграционных тестов успешно, включая очередь Qwen, handoff, bridge token, дедупликацию, сохранение ответа в знания и Manifest V3. Живой DOM chat.qwen.ai и фактическая загрузка расширения в пользовательском Edge/Chrome ещё не проверены.",
+    "current_change_tests": "Windows CI run 36658454930: portable Python tests passed, project history validation passed, and node --check web/app.js passed for Tori Browser learning-center redesign.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
@@ -337,20 +353,26 @@
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36656198475",
       "result": "success",
       "live_qwen_dom_tested": false
+    },
+    "tori_browser_ux": {
+      "commit": "a4b91dc4bc3584c34020523abdb17077d7a8c002",
+      "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36658454930",
+      "result": "success",
+      "user_visual_test_pending": true
     }
   },
   "next_steps": [
     {
       "priority": 1,
-      "task": "Проверить кнопки Начать / Пауза / Остановить и полный цикл вопрос → ответ → сохранение знания на живом Qwen."
+      "task": "Проверить новый интерфейс Браузера Тори на пользовательском Windows и полный цикл вопрос → ответ → знание."
     },
     {
       "priority": 2,
-      "task": "Улучшить DOM-селекторы Qwen, если живой тест выявит пропуски сообщений или отправки."
+      "task": "Добавить безопасные действия для очереди: отменить, пропустить, повторить зависший вопрос."
     },
     {
       "priority": 3,
-      "task": "Добавить безопасный повтор/таймаут для sent-вопросов без повторной отправки при неопределённом состоянии."
+      "task": "Добавить таймауты и восстановление sent-задач после сбоя без двойной отправки."
     },
     {
       "priority": 4,
@@ -358,7 +380,7 @@
     },
     {
       "priority": 5,
-      "task": "Добавить безопасный ZIP-обновлятор с откатом и миграциями."
+      "task": "Рассмотреть отдельный встроенный WebView/Chromium только если профильный Chrome перестанет удовлетворять требованиям."
     }
   ],
   "handoff": {
