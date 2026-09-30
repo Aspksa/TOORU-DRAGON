@@ -200,7 +200,7 @@ class CoreTest(unittest.TestCase):
                 'text': 'Что использовать для Python приложения с SQLite?',
                 'use_context': True,
             })
-        prompt = call.call_args.args[1]
+        prompt = call.call_args_list[0].args[1]
         self.assertIn('Любимый язык', prompt)
         self.assertIn('Python и SQLite', prompt)
         self.assertNotIn('Помидоры', prompt)
