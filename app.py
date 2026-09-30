@@ -238,8 +238,18 @@ def main(argv=None):
     parser.add_argument('--port', type=int, default=8765)
     args = parser.parse_args(argv)
     args.data_dir = args.data_dir.resolve()
-    args.data_dir.mkdir(parents=True, exist_ok=True)
-    lock = InstanceLock(args.data_dir / 'instance.lock')
+    try:
+        args.data_dir.mkdir(parents=True, exist_ok=True)
+        probe = args.data_dir / ('.write-check-' + secrets.token_hex(8))
+        with probe.open('xb') as file:
+            file.write(b'ok')
+        probe.unlink()
+        lock = InstanceLock(args.data_dir / 'instance.lock')
+    except OSError as exc:
+        print('Нет доступа для записи в папку данных:', args.data_dir)
+        print('Распакуйте проект на доступный для записи диск или флешку.')
+        print('Подробности:', exc)
+        return 1
     state_file = args.data_dir / 'server.json'
     if not lock.acquire():
         try:

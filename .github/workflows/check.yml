@@ -13,3 +13,6 @@ jobs:
       - name: Test with portable Python
         shell: cmd
         run: python\python.exe -X utf8 tests\test_core.py
+      - name: Validate project history
+        shell: cmd
+        run: python\python.exe -X utf8 tests\test_history.py
