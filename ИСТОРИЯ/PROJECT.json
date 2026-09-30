@@ -20,11 +20,11 @@
   },
   "project": {
     "name": "TOORU · DRAGON",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "repository": "https://github.com/Aspksa/TOORU-DRAGON",
     "branch": "main",
-    "code_baseline_commit": "cae7e2e25b09844cccd9d17360f2eb63a74e7af9",
-    "stage": "Релиз 0.0.2: единый дизайн, переработанные Личный кабинет/Настройки/Обновления и исправленная логика popup-уведомлений.",
+    "code_baseline_commit": "37278c312e24f379a0bc96b79d21e07985102333",
+    "stage": "Релиз 0.0.3: наблюдаемая Дракончик Тоору, умные уведомления, чат→задача, дневник и решения перед опасными действиями.",
     "goal": "Личный помощник Тори с долговременной памятью, домашними и рабочими проектами, позднее мобильным доступом и обучением."
   },
   "architecture": {
@@ -129,7 +129,7 @@
   "storage": {
     "database": "data/tooru.sqlite3",
     "engine": "SQLite",
-    "schema_version": 10,
+    "schema_version": 11,
     "tables": [
       "settings",
       "records",
@@ -576,7 +576,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "Релиз 0.0.2 подготовлен; финальный Windows CI будет зафиксирован после PR.",
+    "current_change_tests": "Релиз 0.0.3 подготовлен; финальный Windows CI будет зафиксирован после PR.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
@@ -759,6 +759,38 @@
       "единые поверхности/радиусы/тени",
       "единые статусы и кнопки",
       "адаптивные сетки"
+    ]
+  },
+  "release_003": {
+    "version": "0.0.3",
+    "focus": "наблюдаемая Дракончик Тоору",
+    "notifications": {
+      "categories": [
+        "important",
+        "completed",
+        "error",
+        "decision"
+      ],
+      "grouping": "group_key",
+      "duplicate_policy": "идентичные непрочитанные события одной группы не дублируются"
+    },
+    "chat_context": {
+      "command_detection": "imperative heuristic + Qwen structured planning",
+      "task_link": "source_message_id/source_kind=chat",
+      "plan": "plan_json до 8 шагов",
+      "decision_guard": "requires_decision запрещает фоновый execute"
+    },
+    "diary": [
+      "dragon_actions",
+      "learning_queue done",
+      "brain_goals updates"
+    ],
+    "ui": [
+      "живой статус",
+      "счётчики событий",
+      "Дневник",
+      "планы задач",
+      "связь задач с сообщениями чата"
     ]
   }
 }
