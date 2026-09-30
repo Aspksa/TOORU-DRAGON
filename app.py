@@ -1178,6 +1178,7 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
         'temperature': 0.3,
         'instructions': instructions,
         'input': question,
+        'reasoning': {'effort': 'none'},
         'max_output_tokens': max(16, min(int(max_output_tokens), 8000)),
     }, ensure_ascii=False).encode('utf-8')
     request = urllib.request.Request(
@@ -1193,6 +1194,7 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
     try:
         with urllib.request.urlopen(request, timeout=90) as response:
             data = json.load(response)
+        storage.mark_ai_success()
     except urllib.error.HTTPError as exc:
         detail = ''
         try:
@@ -1214,14 +1216,28 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
         ) from None
     except urllib.error.URLError as exc:
         raise ValueError('Нет связи с Yandex AI Studio. Проверь интернет.') from exc
+    usage = data.get('usage') if isinstance(data.get('usage'), dict) else {}
+    input_tokens = int(usage.get('input_tokens', 0) or 0)
+    output_tokens = int(usage.get('output_tokens', 0) or 0)
     text = extract_response_text(data)
     if not text:
-        raise ValueError('AI Studio вернула ответ без текста.')
-    usage = data.get('usage') if isinstance(data.get('usage'), dict) else {}
+        details = data.get('incomplete_details') if isinstance(data.get('incomplete_details'), dict) else {}
+        reason = details.get('reason', '')
+        if input_tokens or output_tokens:
+            storage.add_ai_message(
+                'brain', 'system', 'AI Studio вернула неполный ответ без финального текста.',
+                input_tokens=input_tokens, output_tokens=output_tokens
+            )
+        if reason == 'max_output_tokens':
+            raise ValueError(
+                'AI Studio израсходовала лимит генерации до финального текста. '
+                'TOORU отключил скрытый reasoning для следующих запросов; повтори действие.'
+            )
+        raise ValueError('AI Studio ответила успешно, но не вернула финальный текст. Повтори действие.')
     return {
         'text': text,
-        'input_tokens': int(usage.get('input_tokens', 0) or 0),
-        'output_tokens': int(usage.get('output_tokens', 0) or 0),
+        'input_tokens': input_tokens,
+        'output_tokens': output_tokens,
     }
 
 
@@ -1237,7 +1253,10 @@ class LearningWorker(threading.Thread):
             if not item:
                 continue
             try:
-                result = call_yandex_ai(self.storage, item['question'], item['topic'], purpose='learning')
+                result = call_yandex_ai(
+                    self.storage, item['question'], item['topic'],
+                    max_output_tokens=2600, purpose='learning'
+                )
                 review = self.storage.review_learning_answer(
                     item['topic'], item['question'], result['text']
                 )
