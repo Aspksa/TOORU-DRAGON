@@ -1023,12 +1023,35 @@ class CoreTest(unittest.TestCase):
         with self.assertRaisesRegex(urllib.error.HTTPError, '400'):
             self.request('/api/dragon/project/read', {'path': 'data/tooru.sqlite3'})
 
+    def test_dragon_has_dedicated_menu_and_center(self):
+        html = (app.ROOT / 'web' / 'index.html').read_text('utf-8')
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
+        profile_pos = html.index('data-page="profile"')
+        dragon_pos = html.index('data-page="dragon"')
+        main_pos = html.index('data-page="main"')
+        self.assertLess(profile_pos, dragon_pos)
+        self.assertLess(dragon_pos, main_pos)
+        self.assertIn('🐉', html)
+        self.assertIn("dragon:'Дракончик Тоору'", ui)
+        self.assertIn("page==='dragon'", ui)
+        self.assertIn('Проверить проект', ui)
+        self.assertIn('Открыть Мозг', ui)
+        self.assertIn('Резервная копия', ui)
+        self.assertIn('Последние действия', ui)
+        self.assertIn('.dragon-hero', css)
+        self.assertIn('.dragon-quick-grid', css)
+        # Права больше не дублируются в общей странице Настройки.
+        settings_start = ui.index("page==='settings'")
+        settings_end = ui.index("page==='dragon'", settings_start)
+        self.assertNotIn('dragonSettings()', ui[settings_start:settings_end])
+
     def test_dragon_ui_has_permissions_and_popup_notifications(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
         css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
-        self.assertIn('Права помощника', ui)
-        self.assertIn('Читать весь рабочий проект', ui)
-        self.assertIn('Изменять файлы проекта с резервной копией', ui)
+        self.assertIn('<h2>Права</h2>', ui)
+        self.assertIn('Читать рабочий проект', ui)
+        self.assertIn('Изменять файлы с резервной копией', ui)
         self.assertIn('Показывать всплывающие сообщения', ui)
         self.assertIn('dragon-toast-host', ui)
         self.assertIn('refreshDragonNotifications', ui)
