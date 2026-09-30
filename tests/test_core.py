@@ -691,6 +691,39 @@ class CoreTest(unittest.TestCase):
         self.assertFalse(state['automation']['enabled'])
         self.assertEqual(state['mode'], 'paused')
 
+    def test_goal_automation_marks_reused_completed_learning_done(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/brain/automation', {
+            'enabled': True, 'min_confidence': 0.75, 'daily_limit': 5, 'chain_limit': 3,
+        })
+        existing = self.request('/api/learning/queue', {
+            'topic': 'Метрики',
+            'question': 'Как измерять качество?'
+        })
+        with self.storage.connect() as db:
+            db.execute("UPDATE learning_queue SET status='done' WHERE id=?", (existing['id'],))
+            plan = [{
+                'title': 'Изучить метрики',
+                'type': 'learning',
+                'topic': 'Метрики',
+                'question': 'Как измерять качество?',
+                'reason': 'Уже изучено.',
+                'status': 'pending',
+            }]
+            cursor = db.execute(
+                "INSERT INTO brain_goals(title,description,plan_json,progress_json) VALUES (?,?,?,?)",
+                ('Проверить повтор', '', json.dumps(plan, ensure_ascii=False), '{}')
+            )
+            goal_id = cursor.lastrowid
+        self.assertIsNone(self.storage.promote_autonomous_learning())
+        goal = next(x for x in self.storage.brain_goals('active', 20) if x['id'] == goal_id)
+        self.assertEqual(goal['plan'][0]['status'], 'done')
+        self.assertEqual(goal['plan'][0]['queue_id'], existing['id'])
+
     def test_brain_automation_respects_daily_limit(self):
         self.request('/api/ai/config', {
             'folder_id': 'b1gpcfme4j9b9bv37hqb',
@@ -838,6 +871,18 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(app.extract_response_text(response), 'Ответ модели')
         self.assertEqual(app.extract_response_text({'output': None}), '')
         self.assertEqual(app.extract_response_text(None), '')
+
+    def test_unified_ai_interface_has_only_three_primary_tabs(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        self.assertIn("const tabs={chat:'Чат',brain:'Мозг',data:'Данные'}", ui)
+        chat_start = ui.index('function chatPanel(){')
+        chat_end = ui.index('function reasoningItemsMarkup', chat_start)
+        chat_block = ui[chat_start:chat_end]
+        self.assertNotIn('brainGoalsMarkup(c.goals)', chat_block)
+        self.assertNotIn('brainSuggestionsMarkup(c.suggestions)', chat_block)
+        self.assertIn('Предложения Мозга', ui)
+        self.assertIn('Авторазвитие Тори', ui)
+        self.assertIn("if(page!=='ai'||tab!=='brain'||!state)return;", ui)
 
     def test_learning_ui_uses_ai_studio_and_queue_actions(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')

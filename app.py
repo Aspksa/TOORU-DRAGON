@@ -1199,13 +1199,14 @@ class Storage:
                     if not topic or not question:
                         continue
                     duplicate = db.execute(
-                        "SELECT id FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
-                        "AND status IN ('pending','running','done') LIMIT 1",
+                        "SELECT id,status FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
+                        "AND status IN ('pending','running','done') ORDER BY id DESC LIMIT 1",
                         (topic, question)
                     ).fetchone()
                     if duplicate:
-                        step['status'] = 'queued'
                         step['queue_id'] = duplicate['id']
+                        step['status'] = 'done' if duplicate['status'] == 'done' else 'queued'
+                        step['auto'] = True
                         changed = True
                         continue
                     cursor = db.execute(
@@ -1484,10 +1485,10 @@ class Storage:
                 for step in plan:
                     if not isinstance(step, dict):
                         continue
-                    if step.get('queue_id') == queue_id and step.get('type') == 'learning':
-                        if step.get('status') != 'done':
-                            step['status'] = 'done'
-                            changed = True
+                    if (step.get('queue_id') == queue_id and step.get('type') == 'learning'
+                            and step.get('status') in {'queued','pending'}):
+                        step['status'] = 'done'
+                        changed = True
                         matched_goal = goal['id']
                         break
                 if changed:
