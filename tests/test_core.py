@@ -87,12 +87,15 @@ class CoreTest(unittest.TestCase):
             launch.assert_not_called()
             for browser in ('edge', 'chrome'):
                 result = self.request('/api/qwen/open', {'browser': browser})
-                self.assertIn('Команда открытия', result['message'])
+                self.assertIn('Qwen открыт', result['message'])
                 args = launch.call_args.args[0]
                 profile = Path(self.temp.name).resolve() / 'browser-profile' / browser
                 self.assertTrue(profile.is_dir())
-                self.assertEqual(args, [str(executable), '--user-data-dir=' + str(profile),
-                                       '--new-window', 'https://chat.qwen.ai'])
+                self.assertEqual(args[0], str(executable))
+                self.assertEqual(args[1], '--user-data-dir=' + str(profile))
+                self.assertTrue(args[2].startswith('--load-extension='))
+                self.assertEqual(args[3], '--new-window')
+                self.assertTrue(args[4].startswith('https://chat.qwen.ai/#'))
                 self.assertFalse(launch.call_args.kwargs.get('shell', False))
             self.assertFalse(self.request('/api/state')['qwen_connected'])
             launch.side_effect = OSError('failure')
@@ -117,6 +120,45 @@ class CoreTest(unittest.TestCase):
             executable.touch()
             self.assertEqual(app.find_browser('edge'), executable)
 
+
+    def test_qwen_bridge_queue_handoff_and_knowledge(self):
+        self.request('/api/qwen/control', {'action': 'start'})
+        self.request('/api/qwen/control', {'action': 'handoff'})
+        queued = self.request('/api/qwen/queue', {'topic': 'Python', 'question': 'Что такое WAL?'})
+        bridge_headers = {
+            'X-Tooru-Bridge': self.storage.bridge_token(),
+            'Origin': 'chrome-extension://tooru-test',
+        }
+        poll = self.request('/api/qwen/bridge', {'action': 'poll'}, bridge_headers)
+        self.assertEqual(poll['owner'], 'tori')
+        self.assertEqual(poll['item']['id'], queued['id'])
+        self.request('/api/qwen/bridge', {'action': 'claim', 'queue_id': queued['id']}, bridge_headers)
+        event = {
+            'action': 'event', 'role': 'assistant', 'text': 'WAL — журнал предзаписи.',
+            'source_url': 'https://chat.qwen.ai/c/test', 'queue_id': queued['id'],
+        }
+        first = self.request('/api/qwen/bridge', event, bridge_headers)
+        second = self.request('/api/qwen/bridge', event, bridge_headers)
+        self.assertTrue(first['inserted'])
+        self.assertFalse(second['inserted'])
+        state = self.request('/api/state')
+        self.assertTrue(state['qwen_connected'])
+        self.assertEqual(state['qwen']['queue'][0]['status'], 'done')
+        self.assertEqual(state['records']['knowledge'][0]['source'], 'Qwen · https://chat.qwen.ai/c/test')
+        self.assertIn('WAL', state['records']['knowledge'][0]['body'])
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request('/api/qwen/bridge', {'action': 'heartbeat'},
+                         {'X-Tooru-Bridge': 'wrong', 'Origin': 'chrome-extension://tooru-test'})
+        self.assertEqual(error.exception.code, 403)
+
+    def test_qwen_extension_files_are_valid(self):
+        extension = app.ROOT / 'browser' / 'qwen-bridge'
+        manifest = json.loads((extension / 'manifest.json').read_text('utf-8'))
+        self.assertEqual(manifest['manifest_version'], 3)
+        self.assertIn('https://chat.qwen.ai/*', manifest['content_scripts'][0]['matches'])
+        self.assertTrue((extension / 'background.js').is_file())
+        self.assertTrue((extension / 'content.js').is_file())
+
     def test_duplicate_launcher_and_lock(self):
         lock = app.InstanceLock(Path(self.temp.name) / 'instance.lock')
         self.assertTrue(lock.acquire())
@@ -139,6 +181,7 @@ class PortableTest(unittest.TestCase):
             shutil.copy2(app.ROOT / 'app.py', original / 'app.py')
             shutil.copy2(app.ROOT / 'StartTooruDragon.bat', original / 'StartTooruDragon.bat')
             shutil.copytree(app.ROOT / 'web', original / 'web')
+            shutil.copytree(app.ROOT / 'browser', original / 'browser')
             # On Windows exercise the relocated embedded interpreter as well.
             if sys.platform == 'win32' and (app.ROOT / 'python' / 'python.exe').exists():
                 shutil.copytree(app.ROOT / 'python', original / 'python')

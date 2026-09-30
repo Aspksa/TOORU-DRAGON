@@ -27,6 +27,16 @@ function records(kind) {
 function settingsForm(profile) {
   return `<form id="settings-form" class="panel"><h2>${profile?'Твой профиль':'Параметры интерфейса'}</h2><label for="name">Имя</label><input id="name" name="name" maxlength="80" value="${escapeHtml(state.settings.name)}" required><label for="theme">Оформление</label><select id="theme" name="theme"><option value="system">Как в системе</option><option value="light">Светлое</option><option value="dark">Тёмное</option></select><button class="primary">Сохранить настройки</button></form>`;
 }
+
+function qwenPanel() {
+  const q=state.qwen||{mode:'stopped',owner:'user',connected:false,queue:[],events:[]};
+  const status=q.connected?'Мост подключён':'Мост не обнаружен';
+  const owner=q.owner==='tori'?'Тори управляет':'Управляет пользователь';
+  const mode={observe:'Наблюдение',paused:'Пауза',stopped:'Остановлено'}[q.mode]||q.mode;
+  const queue=(q.queue||[]).map(x=>`<article class="record"><div class="row"><h3>${escapeHtml(x.topic)}</h3><span class="badge">${escapeHtml(x.status)}</span></div><p>${escapeHtml(x.question)}</p></article>`).join('');
+  const events=(q.events||[]).slice(0,8).map(x=>`<article class="record"><div class="row"><h3>${x.role==='assistant'?'Qwen':'Пользователь'}</h3><span class="meta">${escapeHtml(new Date(x.created_at).toLocaleString('ru-RU'))}</span></div><p>${escapeHtml(x.text)}</p></article>`).join('');
+  return `<section class="panel"><h2>Учитель Qwen</h2><div class="row"><span class="badge">${status}</span><span class="badge">${owner}</span><span class="badge">${mode}</span></div><p>Мост работает только в отдельном профиле Тори. Вход, CAPTCHA и подтверждения выполняет пользователь.</p><label for="qwen-browser">Браузер на этом компьютере</label><select id="qwen-browser"><option value="edge">Microsoft Edge</option><option value="chrome">Google Chrome</option></select><div class="row"><button class="primary" data-qwen-open>Открыть браузер Тори</button><button class="action" data-qwen-control="start">Начать</button><button class="action" data-qwen-control="pause">Пауза</button><button class="action" data-qwen-control="stop">Остановить</button></div><div class="row"><button class="primary" data-qwen-control="handoff">Передать диалог Тори</button><button class="action" data-qwen-control="takeover">Забрать управление</button></div><p class="hint">Когда управление у Тори, она отправляет только вопросы из очереди. Ответы сохраняются в «Знания» с источником Qwen. Тексты Qwen считаются непроверенными материалами.</p></section><form id="qwen-queue-form" class="panel"><h2>Очередь вопросов</h2><label for="qwen-topic">Тема</label><input id="qwen-topic" name="topic" maxlength="300" required><label for="qwen-question">Вопрос Qwen</label><textarea id="qwen-question" name="question" maxlength="8000" required></textarea><button class="primary">Добавить в очередь</button></form><section class="panel"><h2>Очередь</h2>${queue||'<div class="empty">Очередь пуста.</div>'}</section><section class="panel"><h2>Последние сообщения Qwen</h2>${events||'<div class="empty">Мост ещё не передавал сообщения.</div>'}</section>`;
+}
 function render() {
   document.getElementById('title').textContent = labels[page];
   document.getElementById('crumb').textContent = labels[page];
@@ -41,7 +51,7 @@ function render() {
     if(tab==='chat') html+='<section class="panel"><h2>Тори ещё не подключена</h2><p>Можно сохранять свои сообщения. Ответы появятся после подключения ИИ-модели.</p><span class="badge">Без генерации ответов</span></section>'+form('chat','Тема сообщения','Твоё сообщение')+records('chat');
     if(tab==='memory') html+='<p class="hint">Здесь ты управляешь сведениями, которые сможешь разрешить Тори использовать.</p>'+form('memory','Что запомнить','Подробности')+records('memory');
     if(tab==='knowledge') html+='<p class="hint">Локальные заметки. Поиск по смыслу и загрузка документов появятся позже.</p>'+form('knowledge','Название материала','Содержание и источник')+records('knowledge');
-    if(tab==='topic') html+='<section class="panel"><h2>Учитель Qwen</h2><span class="badge">Отдельный браузер Тори</span><p>Открой Qwen и войди в аккаунт самостоятельно. Для Тори используется отдельный профиль выбранного браузера.</p><label for="qwen-browser">Браузер на этом компьютере</label><select id="qwen-browser"><option value="edge">Microsoft Edge</option><option value="chrome">Google Chrome</option></select><button class="primary" data-qwen-open>Открыть браузер Тори</button><p class="hint">Профили Edge и Chrome раздельные и сохраняются в data/browser-profile. Перед переносом проекта закрой все окна браузера Тори.</p><p>Наблюдение за диалогом, автоматические вопросы и обучение ещё не подключены. Сейчас можно общаться с Qwen и сохранять темы здесь.</p></section>'+form('topic','Тема обучения','Что нужно изучить')+records('topic');
+    if(tab==='topic') html+=qwenPanel()+form('topic','Тема обучения','Что нужно изучить')+records('topic');
     content.innerHTML=html;
   }
   else if(page==='mobile') content.innerHTML='<section class="panel"><h2>Доступ с телефона</h2><span class="badge">В разработке</span><p>Интерфейс адаптируется к небольшому экрану. Сервер этой версии доступен только на компьютере, где он запущен. Сетевое подключение телефона и синхронизация пока не включены.</p></section>';
@@ -59,6 +69,7 @@ content.addEventListener('click',async event=>{
   try {
     if(b.dataset.delete){if(!confirm('Удалить эту запись из базы?'))return;await api('delete',{id:Number(b.dataset.delete)});await reload();render();message('Запись удалена.');}
     if(b.hasAttribute('data-qwen-open')){const result=await api('qwen/open',{browser:document.getElementById('qwen-browser').value});message(result.message);}
+    if(b.dataset.qwenControl){await api('qwen/control',{action:b.dataset.qwenControl});await reload();render();message('Режим Qwen обновлён.');}
     if(b.hasAttribute('data-backup')){const result=await api('backup',{});message('Копия базы создана: data/backups/'+result.filename);}
     if(b.hasAttribute('data-diagnose')){const d=await api('diagnostics');const pairs=[['База данных',d.database==='ok'?'Проверка пройдена':d.database],['Версия',d.version],['Python',d.python],['SQLite',d.sqlite],['Папка данных',d.data_directory],['ИИ-модель',d.ai],['Qwen',d.qwen],['Доступ',d.access]];const result=document.getElementById('diagnostic-result');if(result)result.innerHTML='<dl>'+pairs.map(([a,v])=>`<dt>${escapeHtml(a)}</dt><dd>${escapeHtml(v)}</dd>`).join('')+'</dl>';}
   }catch(error){message(error.message);}finally{b.disabled=false;}
@@ -69,6 +80,7 @@ content.addEventListener('submit',async event=>{
     const values=Object.fromEntries(new FormData(f));
     if(f.id==='record-form')await api('records',{...values,kind:f.dataset.kind});
     if(f.id==='settings-form')await api('settings',values);
+    if(f.id==='qwen-queue-form')await api('qwen/queue',values);
     await reload();render();message('Сохранено.');
   }catch(error){message(error.message);}finally{b.disabled=false;}
 });
