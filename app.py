@@ -287,7 +287,7 @@ class Storage:
         month_start = time.strftime('%Y-%m-01T00:00:00Z', time.gmtime(now))
 
         def totals_since(cutoff, channel=None):
-            where = "created_at>=? AND role IN ('tori','qwen')"
+            where = "created_at>=? AND (input_tokens>0 OR output_tokens>0)"
             params = [cutoff]
             if channel:
                 where += ' AND channel=?'
@@ -345,7 +345,7 @@ class Storage:
                        ('ai_last_success', str(time.time())))
 
     def ai_messages(self, channel, limit=100):
-        if channel not in {'chat', 'learning'}:
+        if channel not in {'chat', 'learning', 'brain'}:
             raise ValueError('Неизвестный канал диалога.')
         limit = max(1, min(int(limit), 200))
         with self.connect() as db:
@@ -366,7 +366,7 @@ class Storage:
 
     def add_ai_message(self, channel, role, text, queue_id=None,
                        input_tokens=0, output_tokens=0, context=None):
-        if channel not in {'chat', 'learning'}:
+        if channel not in {'chat', 'learning', 'brain'}:
             raise ValueError('Неизвестный канал диалога.')
         if role not in {'user', 'tori', 'qwen', 'system'}:
             raise ValueError('Неизвестный автор сообщения.')
