@@ -68,6 +68,36 @@ class UpdaterTest(unittest.TestCase):
             state = json.loads((root / updater.STATE_REL).read_text('utf-8'))
             self.assertEqual(state['revision'], 'abc123456789')
 
+    def test_revision_changes_reports_file_status_and_protection(self):
+        payload = {
+            'files': [
+                {'filename': 'web/app.js', 'status': 'modified'},
+                {'filename': 'new.txt', 'status': 'added'},
+                {'filename': 'UpdateTooruDragon.bat', 'status': 'modified'},
+            ]
+        }
+        with patch('updater.request_json', return_value=payload):
+            files = updater.revision_changes('a' * 40, 'b' * 40)
+        self.assertEqual(
+            [item['status_label'] for item in files],
+            ['изменён', 'добавлен', 'изменён']
+        )
+        self.assertTrue(files[0]['will_update'])
+        self.assertTrue(files[1]['will_update'])
+        self.assertFalse(files[2]['will_update'])
+
+    def test_latest_revision_separates_title_and_description(self):
+        payload = {
+            'commit': {
+                'sha': 'c' * 40,
+                'commit': {'message': 'Improve updater UI\n\nShow description and changed files.'},
+            }
+        }
+        with patch('updater.request_json', return_value=payload):
+            revision = updater.latest_revision()
+        self.assertEqual(revision['message'], 'Improve updater UI')
+        self.assertEqual(revision['description'], 'Show description and changed files.')
+
     def test_local_status_uses_commit_sha_not_only_version(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -77,13 +107,23 @@ class UpdaterTest(unittest.TestCase):
                 json.dumps({'revision': 'oldsha'}), 'utf-8'
             )
             with patch('updater.latest_revision', return_value={
-                'sha': 'newsha123', 'message': 'Fresh commit'
-            }):
+                'sha': 'b' * 40, 'message': 'Fresh commit', 'description': 'Details'
+            }), patch('updater.revision_changes', return_value=[
+                {
+                    'path': 'web/app.js',
+                    'status': 'modified',
+                    'status_label': 'изменён',
+                    'will_update': True,
+                    'previous_path': '',
+                }
+            ]):
                 status = updater.local_status(root)
             self.assertTrue(status['tracked'])
             self.assertTrue(status['update_available'])
             self.assertEqual(status['version'], '0.0.0')
-            self.assertEqual(status['latest_revision'], 'newsha123')
+            self.assertEqual(status['latest_revision'], 'b' * 40)
+            self.assertEqual(status['latest_description'], 'Details')
+            self.assertEqual(status['files'][0]['path'], 'web/app.js')
 
 
 if __name__ == '__main__':

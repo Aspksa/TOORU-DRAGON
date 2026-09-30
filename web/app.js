@@ -6,6 +6,16 @@ const labels={main:'Главная',profile:'Личный кабинет',ai:'To
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtDate=value=>{try{return new Date(value).toLocaleString('ru-RU')}catch(_e){return ''}};
 function message(text){document.getElementById('message').textContent=text||''}
+function updateStatusMarkup(u){
+  const stateText=!u.tracked?'Локальная сборка ещё не синхронизирована':u.update_available?'Есть обновление':'Установлена последняя ревизия';
+  const installed=u.installed_revision?u.installed_revision.slice(0,12):'—';
+  const description=u.latest_description||'Описание не указано.';
+  let files='';
+  if(!u.files_available)files='<p class="hint">Список файлов появится после первой синхронизации локальной сборки.</p>';
+  else if(!(u.files||[]).length)files='<p class="hint">Изменённых файлов нет.</p>';
+  else files='<div class="update-files"><h3>Файлы обновления</h3><ul>'+u.files.map(file=>'<li><strong>'+escapeHtml(file.status_label||file.status)+'</strong> · <code>'+escapeHtml(file.path)+'</code>'+(file.will_update?'':' <span class="meta">не заменяется обновлятором</span>')+'</li>').join('')+'</ul></div>';
+  return '<dl><dt>Версия</dt><dd>'+escapeHtml(u.version)+'</dd><dt>Установленная ревизия</dt><dd>'+escapeHtml(installed)+'</dd><dt>Ревизия на GitHub</dt><dd>'+escapeHtml(u.latest_revision.slice(0,12))+'</dd><dt>Состояние</dt><dd>'+escapeHtml(stateText)+'</dd><dt>Название обновления</dt><dd>'+escapeHtml(u.latest_message||'—')+'</dd><dt>Описание</dt><dd>'+escapeHtml(description)+'</dd></dl>'+files;
+}
 async function api(path,data){
   const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:{'X-Tooru-Token':token,'Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});
   const result=await response.json();
@@ -270,7 +280,7 @@ content.addEventListener('click',async event=>{
     if(b.dataset.brainAction){await api('brain/action',{id:Number(b.dataset.brainId),action:b.dataset.brainAction});await reload();render();message(b.dataset.brainAction==='accept'?'Предложение применено.':'Предложение отклонено.')}
     if(b.dataset.goalAction){await api('brain/goal/action',{id:Number(b.dataset.goalId),action:b.dataset.goalAction,step:b.dataset.step===undefined?null:Number(b.dataset.step)});await reload();render();message('Цель обновлена.')}
     if(b.hasAttribute('data-ai-test')){const result=await api('ai/test',{});await reload();render();message('AI Studio отвечает: '+result.answer)}
-    if(b.hasAttribute('data-update-check')){const u=await api('update/status');const el=document.getElementById('update-result');if(el)el.innerHTML='<dl><dt>Локальная версия</dt><dd>'+escapeHtml(u.version)+'</dd><dt>Последний GitHub</dt><dd>'+escapeHtml(u.latest_revision.slice(0,12))+'</dd><dt>Состояние</dt><dd>'+escapeHtml(!u.tracked?'Локальная сборка ещё не синхронизирована':u.update_available?'Есть обновление':'Установлена последняя ревизия')+'</dd><dt>Последнее изменение</dt><dd>'+escapeHtml(u.latest_message||'—')+'</dd></dl>'}
+    if(b.hasAttribute('data-update-check')){const u=await api('update/status');const el=document.getElementById('update-result');if(el)el.innerHTML=updateStatusMarkup(u)}
     if(b.hasAttribute('data-update-start')){if(!confirm('Обновить TOORU из GitHub и перезапустить программу?'))return;const u=await api('update/start',{});if(u.already_current){message('Уже установлена последняя ревизия GitHub.')}else{const el=document.getElementById('update-result');if(el)el.textContent='Обновление запущено. TOORU сейчас перезапустится.';message('Создана копия базы: data/backups/'+u.database_backup)}}
     if(b.hasAttribute('data-backup')){const result=await api('backup',{});message('Копия создана: data/backups/'+result.filename)}
     if(b.hasAttribute('data-diagnose')){const d=await api('diagnostics');const pairs=[['База',d.database==='ok'?'OK':d.database],['Python',d.python],['SQLite',d.sqlite],['AI',d.ai],['Модель',d.qwen],['Доступ',d.access]];const el=document.getElementById('diagnostic-result');if(el)el.innerHTML='<dl>'+pairs.map(([a,v])=>`<dt>${escapeHtml(a)}</dt><dd>${escapeHtml(v)}</dd>`).join('')+'</dl>'}
