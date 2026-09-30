@@ -85,18 +85,18 @@ class CoreTest(unittest.TestCase):
                     self.request('/api/qwen/open', {}, headers)
                 self.assertEqual(error.exception.code, 403)
             launch.assert_not_called()
-            for browser in ('edge', 'chrome'):
-                result = self.request('/api/qwen/open', {'browser': browser})
-                self.assertIn('Qwen открыт', result['message'])
-                args = launch.call_args.args[0]
-                profile = Path(self.temp.name).resolve() / 'browser-profile' / browser
-                self.assertTrue(profile.is_dir())
-                self.assertEqual(args[0], str(executable))
-                self.assertEqual(args[1], '--user-data-dir=' + str(profile))
-                self.assertTrue(args[2].startswith('--load-extension='))
-                self.assertEqual(args[3], '--new-window')
-                self.assertTrue(args[4].startswith('https://chat.qwen.ai/#'))
-                self.assertFalse(launch.call_args.kwargs.get('shell', False))
+            result = self.request('/api/qwen/open', {})
+            self.assertIn('Qwen открыт', result['message'])
+            args = launch.call_args.args[0]
+            profile = Path(self.temp.name).resolve() / 'browser-profile' / 'chrome'
+            self.assertTrue(profile.is_dir())
+            self.assertEqual(args[0], str(executable))
+            self.assertEqual(args[1], '--user-data-dir=' + str(profile))
+            self.assertTrue(args[2].startswith('--load-extension='))
+            self.assertEqual(args[3], '--new-window')
+            self.assertTrue(args[4].startswith('https://chat.qwen.ai/#'))
+            self.assertFalse(launch.call_args.kwargs.get('shell', False))
+            self.assertEqual(self.request('/api/state')['qwen']['mode'], 'observe')
             self.assertFalse(self.request('/api/state')['qwen_connected'])
             launch.side_effect = OSError('failure')
             with self.assertRaises(urllib.error.HTTPError) as error:
@@ -110,15 +110,15 @@ class CoreTest(unittest.TestCase):
     def test_browser_discovery_and_invalid_selection(self):
         with patch('app.sys.platform', 'win32'), patch.dict('app.os.environ',
                 {'LOCALAPPDATA': self.temp.name}, clear=True):
-            for invalid in ('firefox', '../chrome', [], None):
+            for invalid in ('firefox', '../chrome', 'edge', [], None):
                 with self.assertRaises(ValueError):
                     app.find_browser(invalid)
             with self.assertRaises(ValueError):
-                app.find_browser('edge')
-            executable = Path(self.temp.name) / 'Microsoft/Edge/Application/msedge.exe'
+                app.find_browser('chrome')
+            executable = Path(self.temp.name) / 'Google/Chrome/Application/chrome.exe'
             executable.parent.mkdir(parents=True)
             executable.touch()
-            self.assertEqual(app.find_browser('edge'), executable)
+            self.assertEqual(app.find_browser('chrome'), executable)
 
 
     def test_qwen_bridge_queue_handoff_and_knowledge(self):
@@ -143,6 +143,10 @@ class CoreTest(unittest.TestCase):
         self.assertFalse(second['inserted'])
         state = self.request('/api/state')
         self.assertTrue(state['qwen_connected'])
+        status = self.request('/api/qwen/status')
+        self.assertTrue(status['connected'])
+        self.assertEqual(status['memory_count'], 0)
+        self.assertEqual(status['knowledge_count'], 1)
         self.assertEqual(state['qwen']['queue'][0]['status'], 'done')
         self.assertEqual(state['records']['knowledge'][0]['source'], 'Qwen · https://chat.qwen.ai/c/test')
         self.assertIn('WAL', state['records']['knowledge'][0]['body'])

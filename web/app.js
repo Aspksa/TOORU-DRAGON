@@ -30,19 +30,26 @@ function settingsForm(profile) {
 
 function qwenPanel() {
   const q=state.qwen||{mode:'stopped',owner:'user',connected:false,queue:[],events:[]};
-  const status=q.connected?'Мост подключён':'Мост не обнаружен';
-  const owner=q.owner==='tori'?'Тори управляет':'Управляет пользователь';
-  const mode={observe:'Наблюдение',paused:'Пауза',stopped:'Остановлено'}[q.mode]||q.mode;
+  const bridgeText=q.connected?'Подключён':'Не подключён';
+  const modeText={observe:'Тори наблюдает',paused:'Обучение на паузе',stopped:'Обучение остановлено'}[q.mode]||q.mode;
+  const ownerText=q.owner==='tori'?'Диалог передан Тори':'Диалог у тебя';
+  const memoryCount=q.memory_count ?? state.counts.memory ?? 0;
+  const knowledgeCount=q.knowledge_count ?? state.counts.knowledge ?? 0;
   const queue=(q.queue||[]).map(x=>`<article class="record"><div class="row"><h3>${escapeHtml(x.topic)}</h3><span class="badge">${escapeHtml(x.status)}</span></div><p>${escapeHtml(x.question)}</p></article>`).join('');
   const events=(q.events||[]).slice(0,8).map(x=>`<article class="record"><div class="row"><h3>${x.role==='assistant'?'Qwen':'Пользователь'}</h3><span class="meta">${escapeHtml(new Date(x.created_at).toLocaleString('ru-RU'))}</span></div><p>${escapeHtml(x.text)}</p></article>`).join('');
-  return `<section class="panel"><h2>Учитель Qwen</h2><div class="row"><span class="badge">${status}</span><span class="badge">${owner}</span><span class="badge">${mode}</span></div><p>Мост работает только в отдельном профиле Тори. Вход, CAPTCHA и подтверждения выполняет пользователь.</p><label for="qwen-browser">Браузер на этом компьютере</label><select id="qwen-browser"><option value="edge">Microsoft Edge</option><option value="chrome">Google Chrome</option></select><div class="row"><button class="primary" data-qwen-open>Открыть браузер Тори</button><button class="action" data-qwen-control="start">Начать</button><button class="action" data-qwen-control="pause">Пауза</button><button class="action" data-qwen-control="stop">Остановить</button></div><div class="row"><button class="primary" data-qwen-control="handoff">Передать диалог Тори</button><button class="action" data-qwen-control="takeover">Забрать управление</button></div><p class="hint">Когда управление у Тори, она отправляет только вопросы из очереди. Ответы сохраняются в «Знания» с источником Qwen. Тексты Qwen считаются непроверенными материалами.</p></section><form id="qwen-queue-form" class="panel"><h2>Очередь вопросов</h2><label for="qwen-topic">Тема</label><input id="qwen-topic" name="topic" maxlength="300" required><label for="qwen-question">Вопрос Qwen</label><textarea id="qwen-question" name="question" maxlength="8000" required></textarea><button class="primary">Добавить в очередь</button></form><section class="panel"><h2>Очередь</h2>${queue||'<div class="empty">Очередь пуста.</div>'}</section><section class="panel"><h2>Последние сообщения Qwen</h2>${events||'<div class="empty">Мост ещё не передавал сообщения.</div>'}</section>`;
+  const startDisabled=q.mode==='observe'?'disabled':'';
+  const pauseDisabled=q.mode==='paused'?'disabled':'';
+  const stopDisabled=q.mode==='stopped'?'disabled':'';
+  const handoffDisabled=q.owner==='tori'?'disabled':'';
+  const takeoverDisabled=q.owner==='user'?'disabled':'';
+  return `<section class="panel training-overview"><h2>Обучение Тори через Qwen</h2><p>Открой Chrome Тори — наблюдение включится автоматически. Пока диалог у тебя, Тори только читает выбранный чат. После передачи управления она может отправлять вопросы из очереди.</p><div class="status-grid"><div class="status-card"><span>Chrome Тори</span><strong>Отдельный профиль</strong><small>data/browser-profile/chrome</small></div><div class="status-card"><span>Мост</span><strong id="bridge-status">${bridgeText}</strong><small id="bridge-help">${q.connected?'Связь с открытой вкладкой Qwen есть':'Открой Chrome Тори и вкладку Qwen'}</small></div><div class="status-card"><span>Обучение</span><strong id="learning-status">${modeText}</strong><small id="owner-status">${ownerText}</small></div><div class="status-card"><span>Память</span><strong>Работает</strong><small id="memory-status">${memoryCount} память · ${knowledgeCount} знания</small></div></div><div class="control-group"><h3>1. Подключение</h3><button class="primary" data-qwen-open>Открыть Chrome Тори</button><span class="hint">При открытии наблюдение запускается автоматически.</span></div><div class="control-group"><h3>2. Наблюдение</h3><div class="row"><button class="action mode-button" data-qwen-control="start" ${startDisabled}>▶ Начать</button><button class="action mode-button" data-qwen-control="pause" ${pauseDisabled}>Ⅱ Пауза</button><button class="action mode-button danger" data-qwen-control="stop" ${stopDisabled}>■ Остановить</button></div></div><div class="control-group"><h3>3. Кто управляет диалогом</h3><div class="row"><button class="primary" data-qwen-control="handoff" ${handoffDisabled}>Передать диалог Тори</button><button class="action" data-qwen-control="takeover" ${takeoverDisabled}>Забрать управление</button></div><p class="hint">Передача управления не обходит вход, CAPTCHA и проверки Qwen. Тори отправляет только вопросы из очереди.</p></div></section><form id="qwen-queue-form" class="panel"><h2>Что Тори должна изучить</h2><p>Добавь тему и конкретный вопрос. Когда диалог передан Тори, вопросы выполняются по очереди.</p><label for="qwen-topic">Тема</label><input id="qwen-topic" name="topic" maxlength="300" required><label for="qwen-question">Вопрос Qwen</label><textarea id="qwen-question" name="question" maxlength="8000" required></textarea><button class="primary">Добавить в очередь обучения</button></form><section class="panel"><h2>Очередь обучения</h2>${queue||'<div class="empty">Очередь пуста.</div>'}</section><section class="panel"><h2>Что Тори увидела в Qwen</h2>${events||'<div class="empty">Пока сообщений нет. Открой Chrome Тори и Qwen.</div>'}</section>`;
 }
 function render() {
   document.getElementById('title').textContent = labels[page];
   document.getElementById('crumb').textContent = labels[page];
   document.querySelectorAll('nav button').forEach(b => {if(b.dataset.page===page)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
   document.getElementById('description').textContent = page==='main'?'Твои проекты и Тори — в одном месте.':'';
-  if(page==='main') content.innerHTML = `<section class="panel"><h2>Добро пожаловать, ${escapeHtml(state.settings.name)}</h2><p>С чего начнём?</p><div class="grid"><button class="action" data-go="ai">Открыть Tooru/Ai →</button><button class="action" data-go="work">Рабочие проекты · ${state.counts.work||0} →</button><button class="action" data-go="home">Домашние проекты · ${state.counts.home||0} →</button><button class="action" data-go="mobile">Мобильное приложение →</button></div></section><p class="hint">Версия 0.0.0 · Проекты, память и настройки сохраняются на этом компьютере. ИИ-модель и Qwen пока не подключены.</p>`;
+  if(page==='main') content.innerHTML = `<section class="panel"><h2>Добро пожаловать, ${escapeHtml(state.settings.name)}</h2><p>С чего начнём?</p><div class="grid"><button class="action" data-go="ai">Открыть Tooru/Ai →</button><button class="action" data-go="work">Рабочие проекты · ${state.counts.work||0} →</button><button class="action" data-go="home">Домашние проекты · ${state.counts.home||0} →</button><button class="action" data-go="mobile">Мобильное приложение →</button></div></section><p class="hint">Версия 0.0.0 · Память и проекты сохраняются локально. Qwen-мост: ${state.qwen_connected?'подключён':'не подключён'}.</p>`;
   else if(page==='profile'||page==='settings') {content.innerHTML=settingsForm(page==='profile');content.querySelector('#theme').value=state.settings.theme;}
   else if(page==='work'||page==='home') content.innerHTML=form(page,'Название проекта','Описание и задачи')+records(page);
   else if(page==='ai') {
@@ -68,7 +75,7 @@ content.addEventListener('click',async event=>{
   b.disabled=true;
   try {
     if(b.dataset.delete){if(!confirm('Удалить эту запись из базы?'))return;await api('delete',{id:Number(b.dataset.delete)});await reload();render();message('Запись удалена.');}
-    if(b.hasAttribute('data-qwen-open')){const result=await api('qwen/open',{browser:document.getElementById('qwen-browser').value});message(result.message);}
+    if(b.hasAttribute('data-qwen-open')){const result=await api('qwen/open',{});await reload();render();message(result.message);}
     if(b.dataset.qwenControl){await api('qwen/control',{action:b.dataset.qwenControl});await reload();render();message('Режим Qwen обновлён.');}
     if(b.hasAttribute('data-backup')){const result=await api('backup',{});message('Копия базы создана: data/backups/'+result.filename);}
     if(b.hasAttribute('data-diagnose')){const d=await api('diagnostics');const pairs=[['База данных',d.database==='ok'?'Проверка пройдена':d.database],['Версия',d.version],['Python',d.python],['SQLite',d.sqlite],['Папка данных',d.data_directory],['ИИ-модель',d.ai],['Qwen',d.qwen],['Доступ',d.access]];const result=document.getElementById('diagnostic-result');if(result)result.innerHTML='<dl>'+pairs.map(([a,v])=>`<dt>${escapeHtml(a)}</dt><dd>${escapeHtml(v)}</dd>`).join('')+'</dl>';}
@@ -84,4 +91,22 @@ content.addEventListener('submit',async event=>{
     await reload();render();message('Сохранено.');
   }catch(error){message(error.message);}finally{b.disabled=false;}
 });
+async function refreshQwenStatus(){
+  if(page!=='ai'||tab!=='topic'||!state)return;
+  try{
+    const q=await api('qwen/status');
+    state.qwen=q;state.qwen_connected=q.connected;
+    const bridge=document.getElementById('bridge-status');
+    const bridgeHelp=document.getElementById('bridge-help');
+    const learning=document.getElementById('learning-status');
+    const owner=document.getElementById('owner-status');
+    const memory=document.getElementById('memory-status');
+    if(bridge)bridge.textContent=q.connected?'Подключён':'Не подключён';
+    if(bridgeHelp)bridgeHelp.textContent=q.connected?'Связь с открытой вкладкой Qwen есть':'Открой Chrome Тори и вкладку Qwen';
+    if(learning)learning.textContent={observe:'Тори наблюдает',paused:'Обучение на паузе',stopped:'Обучение остановлено'}[q.mode]||q.mode;
+    if(owner)owner.textContent=q.owner==='tori'?'Диалог передан Тори':'Диалог у тебя';
+    if(memory)memory.textContent=`${q.memory_count||0} память · ${q.knowledge_count||0} знания`;
+  }catch(_error){}
+}
+setInterval(refreshQwenStatus,2000);
 reload().then(render).catch(error=>{document.getElementById('connection').textContent='Нет связи';message(error.message+' Перезапусти StartTooruDragon.bat и обнови страницу.');});

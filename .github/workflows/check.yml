@@ -16,3 +16,6 @@ jobs:
       - name: Validate project history
         shell: cmd
         run: python\python.exe -X utf8 tests\test_history.py
+      - name: Check Web UI syntax
+        shell: cmd
+        run: node --check web\app.js

@@ -30,11 +30,10 @@ def find_browser(browser):
     if sys.platform != 'win32':
         raise ValueError('Браузер Тори поддерживается на Windows 10/11.')
     locations = {
-        'edge': ('Microsoft/Edge/Application/msedge.exe', 'Microsoft Edge'),
         'chrome': ('Google/Chrome/Application/chrome.exe', 'Google Chrome'),
     }
-    if not isinstance(browser, str) or browser not in locations:
-        raise ValueError('Выберите Microsoft Edge или Google Chrome.')
+    if browser != 'chrome':
+        raise ValueError('Для браузера Тори используется только Google Chrome.')
     relative, name = locations[browser]
     for key in ('PROGRAMFILES(X86)', 'PROGRAMFILES', 'LOCALAPPDATA'):
         root = os.environ.get(key)
@@ -42,7 +41,7 @@ def find_browser(browser):
             candidate = Path(root) / relative
             if candidate.is_file():
                 return candidate
-    raise ValueError(f'{name} не найден. Выберите другой установленный браузер.')
+    raise ValueError(f'{name} не найден. Установите Google Chrome и повторите запуск.')
 
 
 def open_qwen(directory, browser, port, bridge_token):
@@ -181,6 +180,12 @@ class Storage:
                 "SELECT id,role,substr(text,1,800) AS text,source_url,queue_id,created_at "
                 "FROM qwen_events ORDER BY id DESC LIMIT 50"
             )]
+            memory_count = db.execute(
+                "SELECT count(*) FROM records WHERE kind='memory'"
+            ).fetchone()[0]
+            knowledge_count = db.execute(
+                "SELECT count(*) FROM records WHERE kind='knowledge'"
+            ).fetchone()[0]
         try:
             last_seen = float(settings.get('qwen_last_seen', '0'))
         except ValueError:
@@ -193,6 +198,8 @@ class Storage:
             'last_seen': last_seen,
             'queue': queue,
             'events': events,
+            'memory_count': memory_count,
+            'knowledge_count': knowledge_count,
         }
 
     def qwen_control(self, action):
@@ -428,6 +435,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.state())
                 elif self.path == '/api/diagnostics':
                     self.send(200, storage.diagnostics())
+                elif self.path == '/api/qwen/status':
+                    self.send(200, storage.qwen_state())
                 else:
                     self.send(404, {'error': 'Страница не найдена.'})
             except Exception:
@@ -469,10 +478,12 @@ def make_server(storage, port=8765):
                                        [('name', name.strip()), ('theme', theme)])
                     self.send(200, {'ok': True})
                 elif self.path == '/api/qwen/open':
-                    self.send(200, open_qwen(
-                        storage.directory, item.get('browser', 'edge'),
+                    result = open_qwen(
+                        storage.directory, 'chrome',
                         self.server.server_port, storage.bridge_token()
-                    ))
+                    )
+                    storage.qwen_control('start')
+                    self.send(200, result)
                 elif self.path == '/api/qwen/control':
                     self.send(200, storage.qwen_control(item.get('action')))
                 elif self.path == '/api/qwen/queue':
