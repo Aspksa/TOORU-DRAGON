@@ -87,7 +87,7 @@ class CoreTest(unittest.TestCase):
             launch.assert_not_called()
             for browser in ('edge', 'chrome'):
                 result = self.request('/api/qwen/open', {'browser': browser})
-                self.assertIn('Команда открытия', result['message'])
+                self.assertIn('Qwen открыт', result['message'])
                 args = launch.call_args.args[0]
                 profile = Path(self.temp.name).resolve() / 'browser-profile' / browser
                 self.assertTrue(profile.is_dir())
