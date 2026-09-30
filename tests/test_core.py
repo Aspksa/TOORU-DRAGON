@@ -954,7 +954,7 @@ class CoreTest(unittest.TestCase):
 
     def test_schema_v9_has_brain_and_dragon_tables(self):
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 8)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 9)
             columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
         self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens','context_json'} <= columns)
         with self.storage.connect() as db:
@@ -1029,7 +1029,7 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Права помощника', ui)
         self.assertIn('Читать весь рабочий проект', ui)
         self.assertIn('Изменять файлы проекта с резервной копией', ui)
-        self.assertIn('Всплывающие сообщения', ui)
+        self.assertIn('Показывать всплывающие сообщения', ui)
         self.assertIn('dragon-toast-host', ui)
         self.assertIn('refreshDragonNotifications', ui)
         self.assertIn('.dragon-toast-host', css)
