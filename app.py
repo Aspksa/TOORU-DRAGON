@@ -40,7 +40,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 5:
+            if version > 6:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -78,6 +78,22 @@ class Storage:
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 CREATE INDEX IF NOT EXISTS ai_messages_channel_id ON ai_messages(channel, id DESC);
+                CREATE TABLE IF NOT EXISTS brain_suggestions (
+                    id INTEGER PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL DEFAULT '',
+                    topic TEXT NOT NULL DEFAULT '',
+                    question TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    source_message_id INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    decided_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS brain_suggestions_status_id
+                    ON brain_suggestions(status, id DESC);
             ''')
             if version < 3:
                 old_queue = db.execute(
@@ -128,6 +144,26 @@ class Storage:
                 if 'context_json' not in columns:
                     db.execute("ALTER TABLE ai_messages ADD COLUMN context_json TEXT NOT NULL DEFAULT '[]'")
                 db.execute('PRAGMA user_version=5')
+            if version < 6:
+                db.execute("""
+                    CREATE TABLE IF NOT EXISTS brain_suggestions (
+                        id INTEGER PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        body TEXT NOT NULL DEFAULT '',
+                        topic TEXT NOT NULL DEFAULT '',
+                        question TEXT NOT NULL DEFAULT '',
+                        reason TEXT NOT NULL DEFAULT '',
+                        confidence REAL NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        source_message_id INTEGER,
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                        decided_at TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS brain_suggestions_status_id
+                        ON brain_suggestions(status, id DESC);
+                """)
+                db.execute('PRAGMA user_version=6')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
