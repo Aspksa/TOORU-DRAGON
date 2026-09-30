@@ -524,6 +524,13 @@ class Storage:
                 ).fetchone()
                 if duplicate:
                     continue
+                if kind in {'memory', 'knowledge'}:
+                    exists = db.execute(
+                        'SELECT 1 FROM records WHERE kind=? AND lower(title)=lower(?) LIMIT 1',
+                        (kind, title)
+                    ).fetchone()
+                    if exists:
+                        continue
                 cursor = db.execute(
                     'INSERT INTO brain_suggestions(kind,title,body,topic,question,reason,confidence,source_message_id) '
                     'VALUES (?,?,?,?,?,?,?,?)',
@@ -582,6 +589,7 @@ class Storage:
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 12000:
             raise ValueError('Сообщение должно содержать от 1 до 12 000 символов.')
         use_context = item.get('use_context', True) is not False
+        analyze = item.get('analyze', True) is not False
         clean = text.strip()
         self.ensure_budget()
         self.add_ai_message('chat', 'user', clean)
@@ -632,7 +640,8 @@ class Storage:
             context=visible_context
         )
         self.mark_ai_success()
-        self.brain_reflect(clean, result['text'], tori_message_id)
+        if analyze:
+            self.brain_reflect(clean, result['text'], tori_message_id)
         return self.chat_state()
 
     def learning_state(self):
