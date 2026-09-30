@@ -97,6 +97,26 @@ class Storage:
                            "('qwen_mode','qwen_owner','qwen_last_seen','secret.qwen_bridge')")
                 db.execute('PRAGMA user_version=3')
             if version < 4:
+                existing_messages = db.execute(
+                    "SELECT 1 FROM ai_messages WHERE channel='learning' LIMIT 1"
+                ).fetchone()
+                if not existing_messages:
+                    for row in db.execute(
+                        'SELECT id,question,status,response_text,input_tokens,output_tokens,created_at,updated_at '
+                        'FROM learning_queue ORDER BY id'
+                    ).fetchall():
+                        db.execute(
+                            'INSERT INTO ai_messages(channel,role,text,queue_id,created_at) '
+                            'VALUES (?,?,?,?,?)',
+                            ('learning', 'tori', row['question'], row['id'], row['created_at'])
+                        )
+                        if row['status'] == 'done' and row['response_text']:
+                            db.execute(
+                                'INSERT INTO ai_messages(channel,role,text,queue_id,input_tokens,output_tokens,created_at) '
+                                'VALUES (?,?,?,?,?,?,?)',
+                                ('learning', 'qwen', row['response_text'], row['id'],
+                                 row['input_tokens'], row['output_tokens'], row['updated_at'])
+                            )
                 db.execute('PRAGMA user_version=4')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
