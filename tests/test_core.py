@@ -68,14 +68,14 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 400)
 
     def test_release_001_version_and_cache_busted_assets(self):
-        self.assertEqual(app.VERSION, '0.0.3')
-        self.assertIn('meta name="tooru-version" content="0.0.3"', self.html)
+        self.assertEqual(app.VERSION, '0.0.4')
+        self.assertIn('meta name="tooru-version" content="0.0.4"', self.html)
         self.assertRegex(self.html, r'/app\.js\?v=[0-9a-f]{12}')
         self.assertRegex(self.html, r'/style\.css\?v=[0-9a-f]{12}')
         release = self.request('/api/release')
-        self.assertEqual(release['version'], '0.0.3')
+        self.assertEqual(release['version'], '0.0.4')
         self.assertEqual(len(release['asset_revision']), 12)
-        self.assertEqual(release['release']['components']['dragon']['version'], '0.0.3')
+        self.assertEqual(release['release']['components']['dragon']['version'], '0.0.4')
 
         request = urllib.request.Request(self.url + '/app.js?v=' + release['asset_revision'])
         with urllib.request.urlopen(request) as response:
@@ -129,7 +129,7 @@ class CoreTest(unittest.TestCase):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
         css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
         release = json.loads((app.ROOT / 'RELEASE.json').read_text('utf-8'))
-        self.assertEqual(release['version'], '0.0.3')
+        self.assertEqual(release['version'], '0.0.4')
         for text_value in ('Персональная сводка TOORU', 'Задачи Тоору', 'Продолжить работу',
                            "appearance:'Интерфейс'", "ai:'AI'", "versions:'Версии'",
                            'Центр обновления', 'Проверяем состояние обновлений'):
@@ -142,6 +142,25 @@ class CoreTest(unittest.TestCase):
         self.assertIn('.settings-hero', css)
         self.assertIn('.update-hero', css)
         self.assertIn('.update-summary-grid', css)
+
+    def test_brain_004_ui_has_context_lab_clean_queue_and_reasoning_history(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
+        for value in (
+            'Рабочий контекст Тоору', 'Лаборатория Разума', 'Гипотезы и эксперименты',
+            'Очередь знаний', 'Что Тоору хочет запомнить или изучить',
+            'Последние логические разборы', 'Разум v3', 'Обдумать и проверить',
+        ):
+            self.assertIn(value, ui)
+        self.assertIn("id=\"brain-context-form\"", ui)
+        self.assertIn("id=\"brain-experiment-form\"", ui)
+        self.assertIn("data-experiment-run", ui)
+        self.assertIn('learning-queue-card', ui)
+        self.assertIn('reasoning-card', ui)
+        self.assertIn('.work-context-card', css)
+        self.assertIn('.experiment-card', css)
+        self.assertIn('.brain-suggestion-card', css)
+        self.assertIn('.reasoning-history', css)
 
     def test_observable_dragon_ui_has_smart_events_diary_and_chat_links(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
@@ -444,7 +463,7 @@ class CoreTest(unittest.TestCase):
         state = self.request('/api/state')
         self.assertEqual(state['reasoning']['items'][0]['problem'], 'Что развивать дальше в TOORU?')
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 11)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 12)
 
     def test_reasoning_engine_handles_invalid_model_json_without_hidden_trace(self):
         self.request('/api/ai/config', {
@@ -1050,9 +1069,9 @@ class CoreTest(unittest.TestCase):
             self.assertIn('роутер', messages[0]['text'])
             self.assertIn('пакеты', messages[1]['text'])
 
-    def test_schema_v11_has_brain_and_dragon_tables(self):
+    def test_schema_v12_has_brain_dragon_context_and_experiments(self):
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 11)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 12)
             columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
         self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens','context_json'} <= columns)
         with self.storage.connect() as db:
@@ -1072,6 +1091,141 @@ class CoreTest(unittest.TestCase):
             task_columns = {row[1] for row in db.execute('PRAGMA table_info(dragon_tasks)').fetchall()}
         self.assertTrue({'title','action_type','payload_json','plan_json','status','result_json',
                          'source_kind','source_message_id','requires_decision','created_at','updated_at'} <= task_columns)
+        with self.storage.connect() as db:
+            context_columns = {row[1] for row in db.execute('PRAGMA table_info(work_context)').fetchall()}
+            experiment_columns = {row[1] for row in db.execute('PRAGMA table_info(brain_experiments)').fetchall()}
+        self.assertTrue({'area','active_task','last_decision','next_step','source','updated_at'} <= context_columns)
+        self.assertTrue({'hypothesis','experiment_type','plan','expected_result','actual_result',
+                         'verdict','confidence_before','confidence_after','lesson','reasoning_id',
+                         'status','created_at','updated_at'} <= experiment_columns)
+
+    def test_work_context_persists_and_is_visible_in_state(self):
+        original = self.storage.work_context()
+        self.assertTrue(original['area'])
+        updated = self.request('/api/brain/context', {
+            'area': 'TOORU · DRAGON / Мозг',
+            'active_task': 'Проверить лабораторию',
+            'last_decision': 'Сначала минимальный эксперимент',
+            'next_step': 'Проверить доказательства',
+        })
+        self.assertEqual(updated['active_task'], 'Проверить лабораторию')
+        state = self.request('/api/state')
+        self.assertEqual(state['brain_lab']['context']['area'], 'TOORU · DRAGON / Мозг')
+        self.assertEqual(state['brain_lab']['context']['next_step'], 'Проверить доказательства')
+
+    def test_learning_enqueue_reuses_exact_pending_or_completed_question(self):
+        first = self.request('/api/learning/queue', {
+            'topic': 'Контекст',
+            'question': 'Как использовать рабочий контекст?',
+        })
+        second = self.request('/api/learning/queue', {
+            'topic': 'Контекст',
+            'question': 'Как использовать рабочий контекст?',
+        })
+        self.assertEqual(first['id'], second['id'])
+        self.assertTrue(second['duplicate'])
+        with self.storage.connect() as db:
+            count = db.execute(
+                "SELECT count(*) FROM learning_queue WHERE lower(topic)=lower('Контекст') "
+                "AND lower(question)=lower('Как использовать рабочий контекст?')"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_reasoning_creates_experiment_and_updates_work_context(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        analysis = {
+            'summary': 'Нужно проверить причину ошибки интерфейса.',
+            'facts': ['Есть симптом.'],
+            'assumptions': ['Причина может быть в кеше.'],
+            'options': [],
+            'contradictions': [],
+            'decision': 'Проверить влияние кеша на интерфейс.',
+            'confidence': 0.62,
+            'next_step': 'Проверить проект и загрузку assets.',
+        }
+        critic = {
+            'weaknesses': ['Причина пока не доказана.'],
+            'missing_evidence': ['Нет проверки актуальности assets.'],
+            'revised_decision': 'Проверить кеш и хэш assets.',
+            'revised_confidence': 0.58,
+            'next_step': 'Провести минимальную проверку проекта.',
+            'learning_gaps': [],
+        }
+        with patch('app.call_yandex_ai', side_effect=[
+            {'text': json.dumps(analysis, ensure_ascii=False), 'input_tokens': 20, 'output_tokens': 15},
+            {'text': json.dumps(critic, ensure_ascii=False), 'input_tokens': 15, 'output_tokens': 10},
+        ]):
+            result = self.request('/api/brain/reason', {
+                'problem': 'Проверь ошибку интерфейса проекта',
+                'use_context': True,
+            })
+        self.assertIsInstance(result['experiment_id'], int)
+        lab = self.request('/api/brain/lab')
+        experiment = next(x for x in lab['experiments'] if x['id'] == result['experiment_id'])
+        self.assertEqual(experiment['experiment_type'], 'project_scan')
+        self.assertEqual(experiment['status'], 'planned')
+        self.assertIn('Проверить кеш', lab['context']['last_decision'])
+        self.assertIn('минимальную проверку', lab['context']['next_step'])
+
+    def test_confirmed_experiment_saves_verified_lesson(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        created = self.request('/api/brain/experiment', {
+            'hypothesis': 'Хэш web assets защищает интерфейс от старого кеша.',
+            'experiment_type': 'project_scan',
+            'plan': 'Проверить структуру проекта.',
+            'expected_result': 'Найти web/app.js и web/style.css.',
+            'confidence_before': 0.6,
+        })
+        verdict = {
+            'verdict': 'confirmed',
+            'actual_result': 'Файлы web/app.js и web/style.css присутствуют и участвуют в сборке.',
+            'confidence_after': 0.92,
+            'lesson': 'Web assets должны получать ревизию сборки для защиты от старого кеша.',
+        }
+        with patch('app.call_yandex_ai', return_value={
+            'text': json.dumps(verdict, ensure_ascii=False),
+            'input_tokens': 12, 'output_tokens': 9,
+        }):
+            result = self.request('/api/brain/experiment/action', {'id': created['id']})
+        self.assertEqual(result['verdict'], 'confirmed')
+        state = self.request('/api/state')
+        saved = [x for x in state['records']['knowledge']
+                 if x['source'] == 'Лаборатория Разума · эксперимент']
+        self.assertTrue(saved)
+        self.assertIn('Web assets', saved[0]['body'])
+        experiment = next(x for x in state['brain_lab']['experiments'] if x['id'] == created['id'])
+        self.assertEqual(experiment['status'], 'done')
+        self.assertAlmostEqual(experiment['confidence_after'], 0.92, places=2)
+
+    def test_work_context_is_in_chat_prompt(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.storage.save_work_context({
+            'area': 'TOORU / тест контекста',
+            'active_task': 'Проверить чат',
+            'last_decision': 'Контекст должен попасть в prompt',
+            'next_step': 'Ответить пользователю',
+        })
+        with patch('app.call_yandex_ai', side_effect=[
+            {'text': 'Готово.', 'input_tokens': 3, 'output_tokens': 2},
+            {'text': '{"suggestions":[]}', 'input_tokens': 2, 'output_tokens': 1},
+        ]) as call:
+            self.request('/api/chat/send', {'text': 'Расскажи текущую задачу', 'analyze': True})
+        chat_prompt = call.call_args_list[0].args[1]
+        self.assertIn('Текущий рабочий контекст TOORU', chat_prompt)
+        self.assertIn('TOORU / тест контекста', chat_prompt)
+        self.assertIn('Проверить чат', chat_prompt)
 
     def test_dragon_permissions_notifications_and_project_access(self):
         status = self.request('/api/dragon/status')
