@@ -314,7 +314,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "Ожидается финальный Windows CI для ai-chat-ux-v1: schema v4, чат Тори, учебный диалог и обновлённый web UI.",
+    "current_change_tests": "Windows CI run 36662243833: portable Python integration tests, schema 3→4 migration, Tori chat, learning conversation, project history validation and node --check web/app.js all passed.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
@@ -345,6 +345,12 @@
       "result": "success",
       "live_api_key_tested": false,
       "note": "Реальный ключ пользователя намеренно не использовался и не записывался в репозиторий."
+    },
+    "ai_chat_ux_v1": {
+      "commit": "e51636ad4e8d418206ecb3eda754eb26168d3576",
+      "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36662243833",
+      "result": "success",
+      "live_user_visual_test_pending": true
     }
   },
   "next_steps": [
