@@ -381,7 +381,7 @@ function brainExperimentsMarkup(){
   const cards=rows.length?rows.slice(0,20).map(x=>{
     const before=Math.round((Number(x.confidence_before)||0)*100),after=Math.round((Number(x.confidence_after)||0)*100);
     const run=['planned','error'].includes(x.status)?'<button class="mini-action" data-experiment-run="'+x.id+'">Проверить сейчас</button>':'';
-    return '<article class="experiment-card status-'+escapeHtml(x.status)+'"><div class="experiment-top"><div><span class="brain-kind">'+escapeHtml(x.experiment_type==='project_scan'?'Проверка проекта':'Проверка знаний')+'</span><h3>'+escapeHtml(x.hypothesis)+'</h3></div><span class="experiment-state">'+escapeHtml(labels[x.status]||x.status)+'</span></div>'+
+    return '<article class="experiment-card status-'+escapeHtml(x.status)+'"><div class="experiment-top"><div><span class="brain-kind">'+escapeHtml(x.experiment_type==='project_scan'?'Проверка проекта':'Проверка знаний')+'</span>'+(x.auto_allowed?'<span class="experiment-auto">Авто</span>':'<span class="experiment-manual">Ручной</span>')+'<h3>'+escapeHtml(x.hypothesis)+'</h3></div><span class="experiment-state">'+escapeHtml(labels[x.status]||x.status)+'</span></div>'+
       (x.plan?'<div class="experiment-row"><small>Эксперимент</small><p>'+escapeHtml(x.plan)+'</p></div>':'')+
       (x.expected_result?'<div class="experiment-row"><small>Ожидание</small><p>'+escapeHtml(x.expected_result)+'</p></div>':'')+
       (x.actual_result?'<div class="experiment-row result"><small>Фактический результат</small><p>'+escapeHtml(x.actual_result)+'</p></div>':'')+
