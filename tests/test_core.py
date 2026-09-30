@@ -99,6 +99,29 @@ class CoreTest(unittest.TestCase):
         self.assertIn('.build-mismatch', css)
         self.assertIn('.dragon-subtabs', css)
 
+    def test_ui_css_variables_and_combined_data_ids_are_consistent(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
+        definitions = set(re.findall(r'(--[A-Za-z0-9_-]+)\\s*:', css))
+        usages = set(re.findall(r'var\\((--[A-Za-z0-9_-]+)\\)', css))
+        self.assertEqual(usages - definitions, set())
+        self.assertIn('id="${kind}-record-title"', ui)
+        self.assertIn('id="${kind}-record-body"', ui)
+        self.assertNotIn('id="record-title"', ui)
+        self.assertNotIn('id="record-body"', ui)
+
+    def test_dragon_center_is_split_into_stable_internal_tabs(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        self.assertIn("const tabs={overview:'Обзор',tasks:'Задачи',project:'Проект',rights:'Права'}", ui)
+        self.assertIn("data-dragon-tab=", ui)
+        refresh_start = ui.index('async function refreshDragonNotifications')
+        refresh_end = ui.index('function mainPanel', refresh_start)
+        refresh = ui[refresh_start:refresh_end]
+        self.assertNotIn('render();', refresh)
+        self.assertIn("getElementById('dragon-current')", refresh)
+        self.assertIn("getElementById('dragon-tasks')", refresh)
+        self.assertIn('Проводник проекта', ui)
+
     def test_local_security_and_private_files(self):
         for headers in ({}, {'X-Tooru-Token': self.token, 'Origin':'https://example.com'},
                         {'X-Tooru-Token': self.token, 'Host':'example.com'}):
