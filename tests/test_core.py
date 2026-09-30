@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 
@@ -75,6 +76,46 @@ class CoreTest(unittest.TestCase):
             self.request('/data/tooru.sqlite3')
         self.assertEqual(error.exception.code, 404)
         self.assertEqual(self.storage.state()['records']['memory'], [])
+
+    def test_qwen_profile_launch_and_security(self):
+        executable = Path(self.temp.name) / 'Browser with spaces.exe'
+        with patch('app.find_browser', return_value=executable), patch('app.subprocess.Popen') as launch:
+            for headers in ({}, {'X-Tooru-Token': self.token, 'Origin': 'https://example.com'}):
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    self.request('/api/qwen/open', {}, headers)
+                self.assertEqual(error.exception.code, 403)
+            launch.assert_not_called()
+            for browser in ('edge', 'chrome'):
+                result = self.request('/api/qwen/open', {'browser': browser})
+                self.assertIn('Команда открытия', result['message'])
+                args = launch.call_args.args[0]
+                profile = Path(self.temp.name).resolve() / 'browser-profile' / browser
+                self.assertTrue(profile.is_dir())
+                self.assertEqual(args, [str(executable), '--user-data-dir=' + str(profile),
+                                       '--new-window', 'https://chat.qwen.ai'])
+                self.assertFalse(launch.call_args.kwargs.get('shell', False))
+            self.assertFalse(self.request('/api/state')['qwen_connected'])
+            launch.side_effect = OSError('failure')
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request('/api/qwen/open', {})
+            self.assertEqual(error.exception.code, 400)
+        with patch('app.find_browser', side_effect=ValueError('Браузер не найден')):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request('/api/qwen/open', {})
+            self.assertEqual(error.exception.code, 400)
+
+    def test_browser_discovery_and_invalid_selection(self):
+        with patch('app.sys.platform', 'win32'), patch.dict('app.os.environ',
+                {'LOCALAPPDATA': self.temp.name}, clear=True):
+            for invalid in ('firefox', '../chrome', [], None):
+                with self.assertRaises(ValueError):
+                    app.find_browser(invalid)
+            with self.assertRaises(ValueError):
+                app.find_browser('edge')
+            executable = Path(self.temp.name) / 'Microsoft/Edge/Application/msedge.exe'
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            self.assertEqual(app.find_browser('edge'), executable)
 
     def test_duplicate_launcher_and_lock(self):
         lock = app.InstanceLock(Path(self.temp.name) / 'instance.lock')

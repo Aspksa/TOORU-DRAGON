@@ -11,6 +11,7 @@ from pathlib import Path
 import secrets
 import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -21,6 +22,42 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parent
 VERSION = '0.0.0'
 KINDS = {'work', 'home', 'memory', 'knowledge', 'topic', 'chat'}
+
+
+def find_browser(browser):
+    """Use installed Windows browsers; never fall back to a personal profile."""
+    if sys.platform != 'win32':
+        raise ValueError('Браузер Тори поддерживается на Windows 10/11.')
+    locations = {
+        'edge': ('Microsoft/Edge/Application/msedge.exe', 'Microsoft Edge'),
+        'chrome': ('Google/Chrome/Application/chrome.exe', 'Google Chrome'),
+    }
+    if not isinstance(browser, str) or browser not in locations:
+        raise ValueError('Выберите Microsoft Edge или Google Chrome.')
+    relative, name = locations[browser]
+    for key in ('PROGRAMFILES(X86)', 'PROGRAMFILES', 'LOCALAPPDATA'):
+        root = os.environ.get(key)
+        if root:
+            candidate = Path(root) / relative
+            if candidate.is_file():
+                return candidate
+    raise ValueError(f'{name} не найден. Выберите другой установленный браузер.')
+
+
+def open_qwen(directory, browser):
+    executable = find_browser(browser)
+    # Separate directories prevent Edge and Chrome from sharing incompatible data.
+    profile = Path(directory).resolve() / 'browser-profile' / browser
+    profile.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.Popen([str(executable), '--user-data-dir=' + str(profile),
+                          '--new-window', 'https://chat.qwen.ai'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise ValueError('Не удалось запустить браузер Тори. Проверьте установку браузера.') from exc
+    return {'message': 'Команда открытия Qwen отправлена. Войдите в аккаунт в отдельном окне. '
+                       'Наблюдение и автоматические вопросы пока не подключены.'}
 
 
 class Storage:
@@ -208,6 +245,8 @@ def make_server(storage, port=8765):
                         db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)',
                                        [('name', name.strip()), ('theme', theme)])
                     self.send(200, {'ok': True})
+                elif self.path == '/api/qwen/open':
+                    self.send(200, open_qwen(storage.directory, item.get('browser', 'edge')))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
                 else:
