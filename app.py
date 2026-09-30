@@ -859,7 +859,7 @@ class Storage:
             ).fetchall())
             queue = [dict(row) for row in db.execute(
                 'SELECT id,topic,question,status,attempts,substr(response_text,1,1200) AS response_text,'
-                'last_error,input_tokens,output_tokens,created_at,updated_at '
+                'last_error,input_tokens,output_tokens,review_json,created_at,updated_at '
                 'FROM learning_queue ORDER BY id DESC LIMIT 100'
             )]
             memory_count = db.execute(
@@ -868,6 +868,13 @@ class Storage:
             knowledge_count = db.execute(
                 "SELECT count(*) FROM records WHERE kind='knowledge'"
             ).fetchone()[0]
+        for row in queue:
+            try:
+                row['review'] = json.loads(row.pop('review_json') or '{}')
+                if not isinstance(row['review'], dict):
+                    row['review'] = {}
+            except (ValueError, TypeError):
+                row['review'] = {}
         return {
             'mode': settings.get('learning_mode', 'stopped'),
             'configured': bool(settings.get('secret.yandex_api_key')),
@@ -980,7 +987,71 @@ class Storage:
             ).rowcount
             return dict(row) if changed else None
 
-    def complete_learning(self, queue_id, text, input_tokens=0, output_tokens=0):
+    def review_learning_answer(self, topic, question, answer):
+        if self.usage_summary()['blocked']:
+            return {}
+        prompt = (
+            'Проверь качество учебного ответа. Верни только JSON: '
+            '{"verdict":"good|partial|uncertain","confidence":0.0,'
+            '"summary":"...","gaps":[{"topic":"...","question":"...","reason":"..."}]}. '
+            'Оцени полноту и внутреннюю непротиворечивость. Не придумывай внешнюю проверку источников, '
+            'если её не было. gaps — максимум 2 действительно полезных уточняющих вопроса.\n\n'
+            'Тема: ' + topic + '\nВопрос: ' + question + '\nОтвет:\n' + answer[:12000]
+        )
+        try:
+            result = call_yandex_ai(self, prompt, max_output_tokens=600, purpose='review')
+        except Exception as exc:
+            logging.warning('Learning review failed: %s', exc)
+            return {}
+        self.add_ai_message('brain', 'system', 'Самопроверка знания',
+                            input_tokens=result['input_tokens'], output_tokens=result['output_tokens'])
+        data = self._parse_json_object(result['text'])
+        verdict = data.get('verdict') if data.get('verdict') in {'good','partial','uncertain'} else 'uncertain'
+        try:
+            confidence = max(0.0, min(float(data.get('confidence', 0)), 1.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        review = {
+            'verdict': verdict,
+            'confidence': confidence,
+            'summary': str(data.get('summary') or '').strip()[:2000],
+            'gaps': [],
+        }
+        gaps = data.get('gaps', []) if isinstance(data.get('gaps'), list) else []
+        for raw in gaps[:2]:
+            if not isinstance(raw, dict):
+                continue
+            gap = {
+                'topic': str(raw.get('topic') or topic).strip()[:300],
+                'question': str(raw.get('question') or '').strip()[:8000],
+                'reason': str(raw.get('reason') or '').strip()[:1000],
+            }
+            if gap['topic'] and gap['question']:
+                review['gaps'].append(gap)
+        return review
+
+    def create_review_suggestions(self, review):
+        gaps = review.get('gaps', []) if isinstance(review, dict) else []
+        created = 0
+        with self.connect() as db:
+            for gap in gaps[:2]:
+                duplicate = db.execute(
+                    "SELECT 1 FROM brain_suggestions WHERE status='pending' AND kind='learning' "
+                    "AND lower(topic)=lower(?) AND lower(question)=lower(?) LIMIT 1",
+                    (gap['topic'], gap['question'])
+                ).fetchone()
+                if duplicate:
+                    continue
+                db.execute(
+                    "INSERT INTO brain_suggestions(kind,topic,question,reason,confidence) "
+                    "VALUES ('learning',?,?,?,?)",
+                    (gap['topic'], gap['question'], gap.get('reason',''),
+                     float(review.get('confidence', 0) or 0))
+                )
+                created += 1
+        return created
+
+    def complete_learning(self, queue_id, text, input_tokens=0, output_tokens=0, review=None):
         clean = text.strip()
         if not clean:
             raise ValueError('AI Studio вернула пустой ответ.')
@@ -993,9 +1064,10 @@ class Storage:
             model = db.execute("SELECT value FROM settings WHERE key='ai_model'").fetchone()[0]
             db.execute(
                 "UPDATE learning_queue SET status='done',response_text=?,last_error='',"
-                "input_tokens=?,output_tokens=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "input_tokens=?,output_tokens=?,review_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
                 "WHERE id=?",
-                (clean[:50000], int(input_tokens or 0), int(output_tokens or 0), queue_id)
+                (clean[:50000], int(input_tokens or 0), int(output_tokens or 0),
+                 json.dumps(review or {}, ensure_ascii=False), queue_id)
             )
             db.execute(
                 'INSERT INTO records(kind,title,body,source) VALUES (?,?,?,?)',
@@ -1007,6 +1079,8 @@ class Storage:
             input_tokens=input_tokens, output_tokens=output_tokens
         )
         self.mark_ai_success()
+        if review:
+            self.create_review_suggestions(review)
         self.enforce_learning_budget()
         return True
 
@@ -1163,9 +1237,12 @@ class LearningWorker(threading.Thread):
                 continue
             try:
                 result = call_yandex_ai(self.storage, item['question'], item['topic'], purpose='learning')
+                review = self.storage.review_learning_answer(
+                    item['topic'], item['question'], result['text']
+                )
                 self.storage.complete_learning(
                     item['id'], result['text'],
-                    result['input_tokens'], result['output_tokens']
+                    result['input_tokens'], result['output_tokens'], review
                 )
             except Exception as exc:
                 logging.warning('Learning task %s failed: %s', item['id'], exc)
