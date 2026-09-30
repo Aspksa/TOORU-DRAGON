@@ -88,7 +88,8 @@ function chatMessages(c){
     const role=x.role==='user'?'Ты':x.role==='tori'?'Тори':'Система';
     const side=x.role==='user'?'user':x.role==='tori'?'assistant':'system';
     const usage=(x.input_tokens||x.output_tokens)?`<span>${x.input_tokens||0} + ${x.output_tokens||0} ток.</span>`:'';
-    return `<article class="chat-message ${side}"><div class="chat-author">${role}</div><div class="chat-bubble">${escapeHtml(x.text)}</div><div class="chat-meta">${escapeHtml(fmtDate(x.created_at))}${usage}</div></article>`;
+    const context=(x.context||[]).length?`<div class="context-used"><span>Использовано:</span>${x.context.map(item=>`<button type="button" class="context-chip" data-context-kind="${escapeHtml(item.kind)}" data-context-id="${item.id}">${item.kind==='memory'?'Память':'Знание'} · ${escapeHtml(item.title)}</button>`).join('')}</div>`:'';
+    return `<article class="chat-message ${side}"><div class="chat-author">${role}</div><div class="chat-bubble">${escapeHtml(x.text)}</div>${context}<div class="chat-meta">${escapeHtml(fmtDate(x.created_at))}${usage}</div></article>`;
   }).join('');
 }
 function chatPanel(){
@@ -98,7 +99,10 @@ function chatPanel(){
     <div class="chat-stream" id="chat-stream">${chatMessages(c)}</div>
     <form id="chat-form" class="chat-composer">
       <textarea name="text" maxlength="12000" rows="2" placeholder="Напиши Тори…" required ${c.configured?'':'disabled'}></textarea>
-      <button class="primary" ${c.configured?'':'disabled'}>Отправить</button>
+      <div class="composer-side">
+        <label class="context-toggle"><input type="checkbox" name="use_context" value="1" checked> Память и знания</label>
+        <button class="primary" ${c.configured?'':'disabled'}>Отправить</button>
+      </div>
     </form>
     ${c.configured?'':'<p class="hint">Сначала добавь API-ключ в разделе «Настройки».</p>'}
   </section>`;
@@ -205,7 +209,7 @@ content.addEventListener('submit',async event=>{
     if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
     if(f.id==='learning-queue-form')await api('learning/queue',values);
-    if(f.id==='chat-form'){await api('chat/send',{text:values.text});f.reset()}
+    if(f.id==='chat-form'){await api('chat/send',{text:values.text,use_context:values.use_context==='1'});f.reset();const toggle=f.querySelector('[name="use_context"]');if(toggle)toggle.checked=true}
     await reload();render();
     message(f.id==='chat-form'?'Тори ответила.':'Сохранено.');
   }catch(error){message(error.message)}finally{if(b)b.disabled=false}
