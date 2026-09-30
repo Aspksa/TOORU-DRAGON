@@ -484,6 +484,59 @@ class CoreTest(unittest.TestCase):
         # Самопроверка только предлагает следующий вопрос, не ставит его в очередь сама.
         self.assertEqual(len(state['queue']), 1)
 
+    def test_successful_http_marks_connection_and_disables_reasoning(self):
+        self.storage.save_ai_config({
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        payload = {
+            'output': [{'type':'message','content':[{'type':'output_text','text':'OK'}]}],
+            'usage': {'input_tokens': 7, 'output_tokens': 3},
+        }
+        with patch('app.urllib.request.urlopen',
+                   return_value=io.BytesIO(json.dumps(payload).encode('utf-8'))) as call:
+            result = app.call_yandex_ai(self.storage, 'test', purpose='chat')
+        request = call.call_args.args[0]
+        body = json.loads(request.data.decode('utf-8'))
+        self.assertEqual(body['reasoning']['effort'], 'none')
+        self.assertEqual(result['text'], 'OK')
+        self.assertGreater(self.storage.ai_config()['last_success'], 0)
+
+    def test_incomplete_empty_response_counts_usage_and_keeps_connection_verified(self):
+        self.storage.save_ai_config({
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        payload = {
+            'status': 'incomplete',
+            'incomplete_details': {'reason': 'max_output_tokens'},
+            'output': [],
+            'usage': {'input_tokens': 20, 'output_tokens': 500},
+        }
+        with patch('app.urllib.request.urlopen',
+                   return_value=io.BytesIO(json.dumps(payload).encode('utf-8'))):
+            with self.assertRaisesRegex(ValueError, 'лимит генерации'):
+                app.call_yandex_ai(self.storage, 'test', purpose='reflection')
+        self.assertGreater(self.storage.ai_config()['last_success'], 0)
+        usage = self.storage.usage_summary()
+        self.assertEqual(usage['month']['input_tokens'], 20)
+        self.assertEqual(usage['month']['output_tokens'], 500)
+
+    def test_resaving_same_credentials_keeps_verified_status(self):
+        config = {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+            'auth_type': 'api_key',
+        }
+        self.storage.save_ai_config(config)
+        self.storage.mark_ai_success()
+        before = self.storage.ai_config()['last_success']
+        self.storage.save_ai_config(config)
+        self.assertEqual(self.storage.ai_config()['last_success'], before)
+
     def test_extract_response_text_handles_null_content(self):
         response = {
             'output_text': None,
@@ -511,6 +564,8 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Память и знания', ui)
         self.assertIn('Использовано:', ui)
         self.assertIn('Месяц', ui)
+        self.assertIn('Всего AI за месяц', ui)
+        self.assertIn("usageStrip(q.usage,'learning')", ui)
         self.assertIn('Лимит в месяц', ui)
         self.assertIn('0,2 ₽ вход / 0,3 ₽ выход', ui)
         self.assertIn('Мозг Тори', ui)

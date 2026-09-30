@@ -100,15 +100,20 @@ function chatMessages(c){
     return `<article class="chat-message ${side}"><div class="chat-author">${role}</div><div class="chat-bubble">${escapeHtml(x.text)}</div>${context}<div class="chat-meta">${escapeHtml(fmtDate(x.created_at))}${usage}</div></article>`;
   }).join('');
 }
-function usageStrip(usage){
+function usageStrip(usage,scope='all'){
   if(!usage)return '';
   const limit=usage.monthly_budget_rub||0;
-  const spent=usage.month?.cost_rub||0;
-  const pct=limit>0?Math.min(100,spent/limit*100):0;
+  const total=usage.month||{};
+  const scoped=scope==='learning'?(usage.learning_month||{}):scope==='chat'?(usage.chat_month||{}):total;
+  const spent=Number(scoped.cost_rub||0);
+  const totalSpent=Number(total.cost_rub||0);
+  const pct=limit>0?Math.min(100,totalSpent/limit*100):0;
+  const label=scope==='learning'?'Обучение':scope==='chat'?'Чат':'24 часа';
+  const first=scope==='all'?(usage.day||{}):scoped;
   return `<div class="usage-strip ${usage.blocked?'is-blocked':''}">
-    <div><span>24 часа</span><strong>${(usage.day?.cost_rub||0).toFixed(2)} ₽</strong></div>
-    <div><span>Месяц</span><strong>${spent.toFixed(2)} ₽${limit>0?' / '+limit.toFixed(0)+' ₽':''}</strong></div>
-    <div><span>Токены</span><strong>${(usage.month?.input_tokens||0)+(usage.month?.output_tokens||0)}</strong></div>
+    <div><span>${label}</span><strong>${Number(first.cost_rub||0).toFixed(2)} ₽</strong></div>
+    <div><span>${scope==='all'?'Месяц':'Всего AI за месяц'}</span><strong>${(scope==='all'?spent:totalSpent).toFixed(2)} ₽${limit>0?' / '+limit.toFixed(0)+' ₽':''}</strong></div>
+    <div><span>Токены ${scope==='all'?'':'раздела'}</span><strong>${Number(scoped.input_tokens||0)+Number(scoped.output_tokens||0)}</strong></div>
     ${limit>0?`<div class="usage-progress"><i style="width:${pct}%"></i></div>`:''}
   </div>`;
 }
@@ -159,7 +164,7 @@ function chatPanel(){
   const blocked=!!c.usage?.blocked;
   return `<section class="conversation-shell">
     <div class="conversation-head"><div><span class="eyebrow">Личный помощник</span><h2>Чат с Тори</h2></div><span class="status-label ${c.last_success>0?'ok':''}">${!c.configured?'Настрой AI Studio':c.last_success>0?'Онлайн':'Готова'}</span></div>
-    ${usageStrip(c.usage)}
+    ${usageStrip(c.usage,'all')}
     <div class="chat-stream" id="chat-stream">${chatMessages(c)}</div>
     <form id="chat-form" class="chat-composer">
       <textarea name="text" maxlength="12000" rows="2" placeholder="${blocked?'Месячный лимит AI достигнут':'Напиши Тори…'}" required ${c.configured&&!blocked?'':'disabled'}></textarea>
@@ -206,7 +211,7 @@ function learningPanel(){
       <div class="status-chip"><i class="status-dot is-idle"></i><span>Очередь</span><strong id="queue-status">${active}</strong></div>
       <div class="status-chip"><i class="status-dot is-on"></i><span>Знания</span><strong id="memory-status">${q.knowledge_count||0}</strong></div>
     </div>
-    ${usageStrip(q.usage)}
+    <div id="learning-usage">${usageStrip(q.usage,'learning')}</div>
     <div class="learning-controls"><div class="segmented"><button class="action mode-button" data-learning-control="start" ${startDisabled}>▶ Начать</button><button class="action mode-button" data-learning-control="pause" ${pauseDisabled}>Ⅱ Пауза</button><button class="action mode-button" data-learning-control="stop" ${stopDisabled}>■ Стоп</button></div><span class="hint">Зависшие задачи отмечаются автоматически.</span></div>
   </section>
   <section class="conversation-shell learning-chat"><div class="conversation-head"><div><span class="eyebrow">Живой журнал</span><h2>Разговор обучения</h2></div><span class="status-label">${(q.messages||[]).length} сообщений</span></div><div class="chat-stream" id="learning-chat-stream">${learningConversation(q)}</div></section>
@@ -288,11 +293,12 @@ async function refreshLearningStatus(){
   if(page!=='ai'||tab!=='topic'||!state)return;
   try{
     const q=await api('learning/status');state.learning=q;
-    const learning=document.getElementById('learning-status'),queueStatus=document.getElementById('queue-status'),memory=document.getElementById('memory-status'),queue=document.getElementById('queue-list'),stream=document.getElementById('learning-chat-stream');
+    const learning=document.getElementById('learning-status'),queueStatus=document.getElementById('queue-status'),memory=document.getElementById('memory-status'),queue=document.getElementById('queue-list'),stream=document.getElementById('learning-chat-stream'),usage=document.getElementById('learning-usage');
     if(learning)learning.textContent={running:'Работает',paused:'Пауза',stopped:'Остановлено'}[q.mode]||q.mode;
     if(queueStatus)queueStatus.textContent=(q.queue||[]).filter(x=>['pending','running'].includes(x.status)).length;
     if(memory)memory.textContent=q.knowledge_count||0;
     if(queue)queue.innerHTML=learningQueueMarkup(q);
+    if(usage)usage.innerHTML=usageStrip(q.usage,'learning');
     if(stream){const nearBottom=stream.scrollHeight-stream.scrollTop-stream.clientHeight<120;stream.innerHTML=learningConversation(q);if(nearBottom)scrollChat('learning-chat-stream')}
   }catch(_error){}
 }

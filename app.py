@@ -296,6 +296,7 @@ class Storage:
             raise ValueError('Проверь имя модели AI Studio.')
         if not isinstance(api_key, str) or len(api_key) > 500:
             raise ValueError('Некорректный API-ключ.')
+        previous = self.ai_config(include_secret=True)
         with self.connect() as db:
             db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)', [
                 ('ai_folder_id', folder.strip()),
@@ -306,9 +307,16 @@ class Storage:
                 ('ai_monthly_budget_rub', str(monthly_budget)),
             ])
             if api_key.strip():
+                secret_changed = api_key.strip() != previous.get('api_key', '')
+                connection_changed = (
+                    folder.strip() != previous.get('folder_id')
+                    or model.strip() != previous.get('model')
+                    or auth_type != previous.get('auth_type')
+                )
                 db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
                            ('secret.yandex_api_key', api_key.strip()))
-                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
+                if secret_changed or connection_changed:
+                    db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
             if item.get('clear_key') is True:
                 db.execute("DELETE FROM settings WHERE key='secret.yandex_api_key'")
                 db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
@@ -1178,6 +1186,7 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
         'temperature': 0.3,
         'instructions': instructions,
         'input': question,
+        'reasoning': {'effort': 'none'},
         'max_output_tokens': max(16, min(int(max_output_tokens), 8000)),
     }, ensure_ascii=False).encode('utf-8')
     request = urllib.request.Request(
@@ -1193,6 +1202,7 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
     try:
         with urllib.request.urlopen(request, timeout=90) as response:
             data = json.load(response)
+        storage.mark_ai_success()
     except urllib.error.HTTPError as exc:
         detail = ''
         try:
@@ -1214,14 +1224,28 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
         ) from None
     except urllib.error.URLError as exc:
         raise ValueError('Нет связи с Yandex AI Studio. Проверь интернет.') from exc
+    usage = data.get('usage') if isinstance(data.get('usage'), dict) else {}
+    input_tokens = int(usage.get('input_tokens', 0) or 0)
+    output_tokens = int(usage.get('output_tokens', 0) or 0)
     text = extract_response_text(data)
     if not text:
-        raise ValueError('AI Studio вернула ответ без текста.')
-    usage = data.get('usage') if isinstance(data.get('usage'), dict) else {}
+        details = data.get('incomplete_details') if isinstance(data.get('incomplete_details'), dict) else {}
+        reason = details.get('reason', '')
+        if input_tokens or output_tokens:
+            storage.add_ai_message(
+                'brain', 'system', 'AI Studio вернула неполный ответ без финального текста.',
+                input_tokens=input_tokens, output_tokens=output_tokens
+            )
+        if reason == 'max_output_tokens':
+            raise ValueError(
+                'AI Studio израсходовала лимит генерации до финального текста. '
+                'TOORU отключил скрытый reasoning для следующих запросов; повтори действие.'
+            )
+        raise ValueError('AI Studio ответила успешно, но не вернула финальный текст. Повтори действие.')
     return {
         'text': text,
-        'input_tokens': int(usage.get('input_tokens', 0) or 0),
-        'output_tokens': int(usage.get('output_tokens', 0) or 0),
+        'input_tokens': input_tokens,
+        'output_tokens': output_tokens,
     }
 
 
@@ -1237,7 +1261,10 @@ class LearningWorker(threading.Thread):
             if not item:
                 continue
             try:
-                result = call_yandex_ai(self.storage, item['question'], item['topic'], purpose='learning')
+                result = call_yandex_ai(
+                    self.storage, item['question'], item['topic'],
+                    max_output_tokens=2600, purpose='learning'
+                )
                 review = self.storage.review_learning_answer(
                     item['topic'], item['question'], result['text']
                 )
