@@ -36,6 +36,8 @@ async function reload(){
   document.documentElement.style.colorScheme=state.settings.theme==='system'?'light dark':state.settings.theme;
   document.getElementById('avatar').textContent=state.settings.name.slice(0,1).toUpperCase();
   document.getElementById('connection').textContent=state.ai_connected?'AI подключён':'Локально';
+  const dragonDot=document.getElementById('dragon-menu-status');
+  if(dragonDot){const d=state.dragon||{};dragonDot.className='dragon-menu-status '+(d.current?'is-busy':(d.unread_notifications?'has-news':'is-idle'));dragonDot.title=d.current?'Дракончик работает':d.unread_notifications?'Есть новые сообщения':'Дракончик свободна'}
 }
 function profilePanel(){
   return `<div class="library-layout">
@@ -347,30 +349,80 @@ function dragonActionsMarkup(d){
   if(!rows.length)return '<div class="empty-state">Действий пока нет.</div>';
   return rows.slice(0,12).map(a=>'<article class="dragon-action"><span class="dragon-action-icon">◆</span><div><strong>'+escapeHtml(a.summary)+'</strong><p>'+escapeHtml(a.target||'')+'</p><small>'+escapeHtml(fmtDate(a.created_at))+'</small></div></article>').join('');
 }
+function dragonTasksMarkup(d){
+  const tasks=d.tasks||[];
+  if(!tasks.length)return '<div class="empty-state">Очередь задач пуста.</div>';
+  const labels={pending:'В очереди',suggested:'Предложено',running:'Выполняется',done:'Готово',error:'Ошибка',cancelled:'Отменено'};
+  return tasks.slice(0,30).map(t=>{
+    const controls=['pending','suggested','error'].includes(t.status)?'<button class="mini-action" data-dragon-task-action="run" data-dragon-task-id="'+t.id+'">Запустить</button>':'';
+    const cancel=['pending','suggested','running'].includes(t.status)?'<button class="mini-action" data-dragon-task-action="cancel" data-dragon-task-id="'+t.id+'">Отменить</button>':'';
+    const detail=t.result?.error?'<small class="warning">'+escapeHtml(t.result.error)+'</small>':'';
+    return '<article class="dragon-task is-'+escapeHtml(t.status)+'"><span class="dragon-task-state"></span><div><strong>'+escapeHtml(t.title)+'</strong><small>'+escapeHtml(t.action_type)+' · '+escapeHtml(labels[t.status]||t.status)+'</small>'+detail+'</div><div class="dragon-task-actions">'+controls+cancel+'</div></article>';
+  }).join('');
+}
+function dragonSkillsMarkup(d){
+  const skills=d.skills||[];
+  return skills.map(s=>'<article class="dragon-skill '+(s.available?'':'is-disabled')+'"><span>✦</span><div><strong>'+escapeHtml(s.title)+'</strong><small>'+escapeHtml(s.description)+'</small></div><em>'+(s.available?'Доступен':'Нет права')+'</em></article>').join('');
+}
+function dragonActivityMarkup(d){
+  const rows=d.activity||[];
+  const max=Math.max(1,...rows.map(x=>Number(x.count)||0));
+  return '<div class="dragon-activity">'+rows.map(x=>{
+    const height=Math.max(5,Math.round((Number(x.count)||0)/max*100));
+    return '<div class="dragon-day" title="'+escapeHtml(x.day)+' · '+String(x.count)+'"><i style="height:'+height+'%"></i><small>'+escapeHtml(x.day.slice(8))+'</small></div>';
+  }).join('')+'</div>';
+}
+function dragonCurrentMarkup(d){
+  const current=d.current;
+  if(current)return '<div class="dragon-current is-busy"><span class="pulse-dot"></span><div><strong>Сейчас выполняет</strong><p>'+escapeHtml(current.title)+'</p></div></div>';
+  const waiting=(d.tasks||[]).find(t=>['pending','suggested'].includes(t.status));
+  if(waiting)return '<div class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Следующая задача</strong><p>'+escapeHtml(waiting.title)+'</p></div></div>';
+  return '<div class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Сейчас свободна</strong><p>Ждёт новую задачу.</p></div></div>';
+}
+function dragonModeControl(d){
+  const names={observe:'Наблюдать',suggest:'Предлагать',execute:'Выполнять'};
+  return '<div class="dragon-mode-control">'+Object.entries(names).map(([key,label])=>'<button class="'+(d.mode===key?'is-active':'')+'" data-dragon-mode="'+key+'">'+label+'</button>').join('')+'</div>';
+}
+function dragonFileList(files){
+  if(!files?.length)return '<div class="empty-state">Нажми «Проводник проекта».</div>';
+  return '<div class="dragon-file-list">'+files.slice(0,120).map(file=>'<button data-dragon-file="'+escapeHtml(file.path)+'"><span>▤</span><strong>'+escapeHtml(file.path)+'</strong><small>'+escapeHtml(formatBytes(file.size))+'</small></button>').join('')+'</div>';
+}
 function dragonPanel(){
-  const d=state.dragon||{name:'Дракончик Тоору',permissions:{},actions:[],notifications:[],unread_notifications:0};
+  const d=state.dragon||{name:'Дракончик Тоору',permissions:{},actions:[],notifications:[],tasks:[],skills:[],activity:[],unread_notifications:0,mode:'suggest'};
   const q=state.learning||{};
   const enabled=Object.values(d.permissions||{}).filter(Boolean).length;
   const total=Object.keys(d.permissions||{}).length;
   const auto=q.automation?.enabled;
+  const queued=(d.tasks||[]).filter(t=>['pending','suggested','running'].includes(t.status)).length;
   return '<section class="dragon-hero">'+
     '<div class="dragon-emblem" aria-hidden="true">🐉</div>'+
-    '<div class="dragon-hero-copy"><span class="eyebrow">Помощник</span><h2>'+escapeHtml(d.name||'Дракончик Тоору')+'</h2><p>Центр управления помощником, её правами, действиями и связью с проектом.</p>'+
-      '<div class="dragon-badges"><span class="status-label ok">'+enabled+' / '+total+' прав</span><span class="status-label '+(auto?'ok':'')+'">Авторазвитие: '+(auto?'включено':'выключено')+'</span><span class="status-label">'+(d.unread_notifications||0)+' новых</span></div>'+
-    '</div>'+
+    '<div class="dragon-hero-copy"><span class="eyebrow">Центр действий</span><h2>'+escapeHtml(d.name||'Дракончик Тоору')+'</h2><p>Задачи, автономность, навыки, проект и активность в одном месте.</p>'+
+      '<div class="dragon-badges"><span class="status-label ok">'+enabled+' / '+total+' прав</span><span class="status-label '+(auto?'ok':'')+'">Мозг: '+(auto?'авто':'ручной')+'</span><span class="status-label">'+queued+' задач</span><span class="status-label">'+(d.unread_notifications||0)+' новых</span></div>'+
+    '</div><button class="dragon-voice-button" data-dragon-speak title="Озвучить состояние">🔊</button>'+
   '</section>'+
+  dragonCurrentMarkup(d)+
+  '<section class="panel dragon-mode-panel"><div class="section-head"><div><span class="eyebrow">Автономность</span><h2>Режим работы</h2></div></div>'+dragonModeControl(d)+'<p class="hint">Наблюдать — ничего не запускать. Предлагать — формировать очередь. Выполнять — автоматически выполнять только разрешённые навыки.</p></section>'+
   '<div class="dragon-quick-grid">'+
     '<button class="dragon-quick primary-card" data-go="ai" data-open-tab="brain"><span>✦</span><strong>Открыть Мозг</strong><small>Разум, цели и обучение</small></button>'+
-    '<button class="dragon-quick" data-dragon-scan><span>⌁</span><strong>Проверить проект</strong><small>Посчитать доступные файлы</small></button>'+
-    '<button class="dragon-quick" data-backup><span>▣</span><strong>Резервная копия</strong><small>Скопировать базу TOORU</small></button>'+
-    '<button class="dragon-quick" data-update-check><span>↓</span><strong>Проверить обновление</strong><small>Сравнить с GitHub main</small></button>'+
+    '<button class="dragon-quick" data-dragon-explorer><span>▤</span><strong>Проводник проекта</strong><small>Файлы и чтение</small></button>'+
+    '<button class="dragon-quick" data-dragon-quick-task="database_backup"><span>▣</span><strong>Задача: резервная копия</strong><small>Добавить в очередь</small></button>'+
+    '<button class="dragon-quick" data-dragon-quick-task="update_check"><span>↓</span><strong>Задача: обновления</strong><small>Добавить в очередь</small></button>'+
   '</div>'+
   '<div class="dragon-center-grid">'+
-    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Доступ</span><h2>Права</h2></div><span class="dragon-shield">◆</span></div>'+dragonPermissionsForm()+'</section>'+
-    '<section class="panel"><div class="section-head"><div><span class="eyebrow">События</span><h2>Уведомления</h2></div><button class="mini-action" data-dragon-read-all>Прочитано</button></div><div id="dragon-notifications">'+dragonNotificationsMarkup(d)+'</div></section>'+
+    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Очередь</span><h2>Задачи Дракончика</h2></div><span class="status-label">'+queued+'</span></div>'+
+      '<form id="dragon-task-form" class="clean-form"><input name="title" maxlength="300" placeholder="Что поручить Дракончику?" required><select name="action_type"><option value="note">Заметка / задача</option><option value="project_scan">Проверить проект</option><option value="database_backup">Резервная копия</option><option value="update_check">Проверить обновление</option><option value="file_read">Прочитать файл</option></select><input name="path" maxlength="500" placeholder="Путь к файлу — если нужен"><div class="form-actions"><button class="primary">Добавить задачу</button><button type="button" class="action" data-dragon-mic>🎙 Голосом</button></div></form>'+
+      '<div id="dragon-tasks">'+dragonTasksMarkup(d)+'</div></section>'+
+    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Навыки</span><h2>Что умеет</h2></div></div><div class="dragon-skills">'+dragonSkillsMarkup(d)+'</div></section>'+
   '</div>'+
-  '<section class="panel"><div class="section-head"><div><span class="eyebrow">История</span><h2>Последние действия</h2></div><span class="meta">Все изменения проекта журналируются</span></div><div id="dragon-actions">'+dragonActionsMarkup(d)+'</div></section>'+
-  '<section class="panel dragon-project-state"><div class="section-head"><div><span class="eyebrow">Проект</span><h2>Доступ Дракончика</h2></div></div><div id="dragon-project-result" class="hint">Нажми «Проверить проект», чтобы увидеть доступный объём.</div></section>';
+  '<div class="dragon-center-grid">'+
+    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Активность</span><h2>14 дней</h2></div></div>'+dragonActivityMarkup(d)+'</section>'+
+    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Доступ</span><h2>Права</h2></div><span class="dragon-shield">◆</span></div><details><summary>Показать права</summary>'+dragonPermissionsForm()+'</details></section>'+
+  '</div>'+
+  '<section class="panel dragon-project-state"><div class="section-head"><div><span class="eyebrow">Проводник</span><h2>Файлы проекта</h2></div><button class="mini-action" data-dragon-explorer>Обновить</button></div><div id="dragon-project-files">'+dragonFileList(window.dragonProjectFiles||[])+'</div><pre id="dragon-file-preview" class="dragon-file-preview">Выбери файл для просмотра.</pre></section>'+
+  '<div class="dragon-center-grid">'+
+    '<section class="panel"><div class="section-head"><div><span class="eyebrow">События</span><h2>Уведомления</h2></div><button class="mini-action" data-dragon-read-all>Прочитано</button></div><div id="dragon-notifications">'+dragonNotificationsMarkup(d)+'</div></section>'+
+    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Лента</span><h2>Что Тоору делала</h2></div></div><div id="dragon-actions">'+dragonActionsMarkup(d)+'</div></section>'+
+  '</div>';
 }
 function ensureDragonToastHost(){
   let host=document.getElementById('dragon-toast-host');
@@ -393,7 +445,14 @@ async function refreshDragonNotifications(){
   try{
     const d=await api('dragon/status');
     state.dragon=d;
+    const dragonDot=document.getElementById('dragon-menu-status');
+    if(dragonDot){dragonDot.className='dragon-menu-status '+(d.current?'is-busy':(d.unread_notifications?'has-news':'is-idle'))}
     (d.notifications||[]).filter(n=>!n.is_read).slice(0,3).forEach(showDragonToast);
+    if(page==='dragon'){
+      const active=document.activeElement;
+      const editing=active&&['INPUT','TEXTAREA','SELECT'].includes(active.tagName);
+      if(!editing)render();
+    }
   }catch(_error){}
 }
 function mainPanel(){
@@ -445,7 +504,14 @@ content.addEventListener('click',async event=>{
     if(b.dataset.learningAction){await api('learning/action',{id:Number(b.dataset.learningId),action:b.dataset.learningAction});await reload();render();message('Задача обновлена.')}
     if(b.dataset.brainAction){await api('brain/action',{id:Number(b.dataset.brainId),action:b.dataset.brainAction});await reload();render();message(b.dataset.brainAction==='accept'?'Предложение применено.':'Предложение отклонено.')}
     if(b.dataset.goalAction){await api('brain/goal/action',{id:Number(b.dataset.goalId),action:b.dataset.goalAction,step:b.dataset.step===undefined?null:Number(b.dataset.step)});await reload();render();message('Цель обновлена.')}
-    if(b.hasAttribute('data-dragon-scan')){const result=await api('dragon/project');const el=document.getElementById('dragon-project-result');const bytes=(result.files||[]).reduce((sum,x)=>sum+Number(x.size||0),0);if(el)el.innerHTML='<strong>'+String((result.files||[]).length)+'</strong> доступных файлов · '+escapeHtml(formatBytes(bytes));message('Проект проверен.')}
+    if(b.hasAttribute('data-dragon-scan')){const result=await api('dragon/project');window.dragonProjectFiles=result.files||[];render();message('Проект проверен.')}
+    if(b.hasAttribute('data-dragon-explorer')){const result=await api('dragon/project');window.dragonProjectFiles=result.files||[];render();message('Проводник обновлён.')}
+    if(b.dataset.dragonFile){const result=await api('dragon/project/read',{path:b.dataset.dragonFile});const el=document.getElementById('dragon-file-preview');if(el)el.textContent=result.text;message('Открыт '+result.path)}
+    if(b.dataset.dragonMode){await api('dragon/mode',{mode:b.dataset.dragonMode});await reload();render();message('Режим Дракончика изменён.')}
+    if(b.dataset.dragonTaskAction){await api('dragon/task/action',{id:Number(b.dataset.dragonTaskId),action:b.dataset.dragonTaskAction});await reload();render();message('Очередь обновлена.')}
+    if(b.dataset.dragonQuickTask){const names={database_backup:'Создать резервную копию',update_check:'Проверить обновления'};await api('dragon/task',{title:names[b.dataset.dragonQuickTask]||'Задача',action_type:b.dataset.dragonQuickTask,payload:{}});await reload();render();message('Задача добавлена.')}
+    if(b.hasAttribute('data-dragon-speak')){const d=state.dragon||{};const text=d.current?'Сейчас выполняю: '+d.current.title:'Сейчас я свободна. В очереди '+String((d.tasks||[]).filter(x=>['pending','suggested'].includes(x.status)).length)+' задач.';if('speechSynthesis'in window){speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(text))}else message('Озвучивание не поддерживается этим браузером.')}
+    if(b.hasAttribute('data-dragon-mic')){const R=window.SpeechRecognition||window.webkitSpeechRecognition;if(!R){message('Распознавание речи не поддерживается этим браузером.')}else{const r=new R();r.lang='ru-RU';r.onresult=e=>{const input=document.querySelector('#dragon-task-form [name="title"]');if(input)input.value=e.results[0][0].transcript};r.onerror=()=>message('Не удалось распознать голос.');r.start()}}
     if(b.hasAttribute('data-dragon-read-all')){await api('dragon/notifications/read',{ids:null});await reload();render();message('Уведомления отмечены прочитанными.')}
     if(b.hasAttribute('data-ai-test')){const result=await api('ai/test',{});await reload();render();message('AI Studio отвечает: '+result.answer)}
     if(b.hasAttribute('data-update-check')){const u=await api('update/status');const el=document.getElementById('update-result');if(el)el.innerHTML=updateStatusMarkup(u)}
@@ -462,6 +528,7 @@ content.addEventListener('submit',async event=>{
     if(f.id==='profile-form')await api('settings',{name:values.name,theme:state.settings.theme});
     if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
+    if(f.id==='dragon-task-form')await api('dragon/task',{title:values.title,action_type:values.action_type,payload:values.path?{path:values.path}:{}});
     if(f.id==='dragon-permissions-form')await api('dragon/permissions',{
       project_read:values.project_read==='1',
       project_write:values.project_write==='1',
