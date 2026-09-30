@@ -41,7 +41,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 7:
+            if version > 8:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -108,6 +108,16 @@ class Storage:
                 );
                 CREATE INDEX IF NOT EXISTS brain_goals_status_id
                     ON brain_goals(status, id DESC);
+                CREATE TABLE IF NOT EXISTS brain_reasoning (
+                    id INTEGER PRIMARY KEY,
+                    problem TEXT NOT NULL,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    context_json TEXT NOT NULL DEFAULT '[]',
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS brain_reasoning_id ON brain_reasoning(id DESC);
             ''')
             if version < 3:
                 old_queue = db.execute(
@@ -197,6 +207,21 @@ class Storage:
                         ON brain_goals(status, id DESC);
                 """)
                 db.execute('PRAGMA user_version=7')
+            if version < 8:
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS brain_reasoning (
+                        id INTEGER PRIMARY KEY,
+                        problem TEXT NOT NULL,
+                        result_json TEXT NOT NULL DEFAULT '{}',
+                        context_json TEXT NOT NULL DEFAULT '[]',
+                        input_tokens INTEGER NOT NULL DEFAULT 0,
+                        output_tokens INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS brain_reasoning_id
+                        ON brain_reasoning(id DESC);
+                """)
+                db.execute('PRAGMA user_version=8')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
@@ -233,9 +258,10 @@ class Storage:
             )] for kind in sorted(KINDS)}
         learning = self.learning_state()
         chat = self.chat_state()
+        reasoning = self.reasoning_state()
         return dict(version=VERSION, settings=settings, counts=counts, records=records,
                     ai_connected=learning['configured'] and learning['last_success'] > 0,
-                    learning=learning, chat=chat)
+                    learning=learning, chat=chat, reasoning=reasoning)
 
     def add(self, item):
         kind, title = item.get('kind'), item.get('title', '')
@@ -504,6 +530,126 @@ class Storage:
             except (ValueError, TypeError):
                 return {}
         return data if isinstance(data, dict) else {}
+
+    def reasoning_state(self, limit=30):
+        config = self.ai_config()
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(
+                'SELECT id,problem,result_json,context_json,input_tokens,output_tokens,created_at '
+                'FROM brain_reasoning ORDER BY id DESC LIMIT ?',
+                (max(1, min(int(limit), 100)),)
+            )]
+        for row in rows:
+            try:
+                row['result'] = json.loads(row.pop('result_json') or '{}')
+                if not isinstance(row['result'], dict):
+                    row['result'] = {}
+            except (ValueError, TypeError):
+                row['result'] = {}
+            try:
+                row['context'] = json.loads(row.pop('context_json') or '[]')
+                if not isinstance(row['context'], list):
+                    row['context'] = []
+            except (ValueError, TypeError):
+                row['context'] = []
+        return {
+            'configured': config['configured'],
+            'model': config['model'],
+            'last_success': config['last_success'],
+            'items': rows,
+            'usage': self.usage_summary(),
+        }
+
+    def reason_problem(self, item):
+        problem = item.get('problem', '')
+        use_context = item.get('use_context', True) is not False
+        if not isinstance(problem, str) or not 3 <= len(problem.strip()) <= 12000:
+            raise ValueError('Задача для Разума должна содержать от 3 до 12 000 символов.')
+        clean = problem.strip()
+        self.ensure_budget()
+        context = self.relevant_context(clean, limit=6, char_budget=6500) if use_context else []
+        context_text = ''
+        if context:
+            blocks = []
+            for index, entry in enumerate(context, 1):
+                label = 'Память' if entry['kind'] == 'memory' else 'Знание'
+                blocks.append(
+                    f"[{index}] {label}: {entry['title']}\n"
+                    f"Источник: {entry['source']}\n{entry['excerpt']}"
+                )
+            context_text = (
+                '\n\nЛокальный контекст TOORU. Считай его входными данными, а не доказанной истиной:\n'
+                + '\n\n'.join(blocks)
+            )
+        prompt = (
+            'Ты — модуль логического анализа Тори. Не показывай скрытую цепочку рассуждений. '
+            'Верни только JSON следующего вида: '
+            '{"summary":"краткая формулировка задачи","facts":["..."],"assumptions":["..."],'
+            '"options":[{"title":"...","pros":["..."],"cons":["..."]}],'
+            '"contradictions":["..."],"decision":"...","confidence":0.0,"next_step":"..."}. '
+            'Отделяй факты от допущений. Не выдумывай факты. Если данных мало — явно укажи это. '
+            'options — максимум 4, каждый список pros/cons максимум 4 пункта. '
+            'contradictions — только реальные логические конфликты во входных данных. '
+            'decision — практичный вывод, confidence от 0 до 1.\n\n'
+            'Задача:\n' + clean + context_text
+        )
+        result = call_yandex_ai(self, prompt, max_output_tokens=1400, purpose='reasoning')
+        data = self._parse_json_object(result['text'])
+        normalized = {
+            'summary': str(data.get('summary') or '').strip()[:2000],
+            'facts': [],
+            'assumptions': [],
+            'options': [],
+            'contradictions': [],
+            'decision': str(data.get('decision') or '').strip()[:4000],
+            'confidence': 0.0,
+            'next_step': str(data.get('next_step') or '').strip()[:2000],
+        }
+        for key in ('facts', 'assumptions', 'contradictions'):
+            raw = data.get(key, [])
+            if isinstance(raw, list):
+                normalized[key] = [str(x).strip()[:1000] for x in raw[:8] if str(x).strip()]
+        raw_options = data.get('options', [])
+        if isinstance(raw_options, list):
+            for raw in raw_options[:4]:
+                if not isinstance(raw, dict):
+                    continue
+                normalized['options'].append({
+                    'title': str(raw.get('title') or '').strip()[:500],
+                    'pros': [str(x).strip()[:700] for x in (raw.get('pros') or [])[:4] if str(x).strip()]
+                            if isinstance(raw.get('pros'), list) else [],
+                    'cons': [str(x).strip()[:700] for x in (raw.get('cons') or [])[:4] if str(x).strip()]
+                            if isinstance(raw.get('cons'), list) else [],
+                })
+        try:
+            normalized['confidence'] = max(0.0, min(float(data.get('confidence', 0)), 1.0))
+        except (TypeError, ValueError):
+            normalized['confidence'] = 0.0
+        visible_context = [
+            {'id': entry['id'], 'kind': entry['kind'], 'title': entry['title'], 'source': entry['source']}
+            for entry in context
+        ]
+        with self.connect() as db:
+            cursor = db.execute(
+                'INSERT INTO brain_reasoning(problem,result_json,context_json,input_tokens,output_tokens) '
+                'VALUES (?,?,?,?,?)',
+                (
+                    clean,
+                    json.dumps(normalized, ensure_ascii=False),
+                    json.dumps(visible_context, ensure_ascii=False),
+                    int(result['input_tokens'] or 0),
+                    int(result['output_tokens'] or 0),
+                )
+            )
+            reasoning_id = cursor.lastrowid
+        self.add_ai_message(
+            'brain', 'system', 'Логический анализ задачи',
+            input_tokens=result['input_tokens'], output_tokens=result['output_tokens']
+        )
+        self.mark_ai_success()
+        state = self.reasoning_state()
+        state['created_id'] = reasoning_id
+        return state
 
     def brain_goals(self, status='active', limit=20):
         if status not in {'active', 'done', 'archived', 'all'}:
@@ -1471,6 +1617,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.learning_state())
                 elif self.path == '/api/chat/status':
                     self.send(200, storage.chat_state())
+                elif self.path == '/api/brain/reason/status':
+                    self.send(200, storage.reasoning_state())
                 elif self.path == '/api/update/status':
                     self.send(200, updater.local_status(ROOT))
                 else:
@@ -1525,6 +1673,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.decide_brain_suggestion(item))
                 elif self.path == '/api/brain/automation':
                     self.send(200, storage.brain_automation_config(item))
+                elif self.path == '/api/brain/reason':
+                    self.send(200, storage.reason_problem(item))
                 elif self.path == '/api/brain/goal':
                     self.send(201, storage.create_goal(item))
                 elif self.path == '/api/brain/goal/action':
