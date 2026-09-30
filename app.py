@@ -25,6 +25,9 @@ KINDS = {'work', 'home', 'memory', 'knowledge', 'topic', 'chat'}
 YANDEX_AI_URL = 'https://ai.api.cloud.yandex.net/v1/responses'
 DEFAULT_YANDEX_FOLDER = 'b1gpcfme4j9b9bv37hqb'
 DEFAULT_YANDEX_MODEL = 'qwen3.6-35b-a3b/latest'
+DEFAULT_INPUT_RUB_PER_1K = 0.2
+DEFAULT_OUTPUT_RUB_PER_1K = 0.3
+DEFAULT_MONTHLY_BUDGET_RUB = 1000.0
 STALE_SECONDS = 600
 
 
@@ -133,6 +136,12 @@ class Storage:
                        ('ai_model', DEFAULT_YANDEX_MODEL))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('learning_mode', 'stopped'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
+                       ('ai_input_rub_per_1k', str(DEFAULT_INPUT_RUB_PER_1K)))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
+                       ('ai_output_rub_per_1k', str(DEFAULT_OUTPUT_RUB_PER_1K)))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
+                       ('ai_monthly_budget_rub', str(DEFAULT_MONTHLY_BUDGET_RUB)))
 
     @contextmanager
     def connect(self):
@@ -175,13 +184,17 @@ class Storage:
         with self.connect() as db:
             rows = dict(db.execute(
                 "SELECT key,value FROM settings WHERE key IN "
-                "('ai_folder_id','ai_model','ai_last_success','secret.yandex_api_key')"
+                "('ai_folder_id','ai_model','ai_last_success','secret.yandex_api_key',"
+                "'ai_input_rub_per_1k','ai_output_rub_per_1k','ai_monthly_budget_rub')"
             ).fetchall())
         result = {
             'folder_id': rows.get('ai_folder_id', DEFAULT_YANDEX_FOLDER),
             'model': rows.get('ai_model', DEFAULT_YANDEX_MODEL),
             'configured': bool(rows.get('secret.yandex_api_key')),
             'last_success': float(rows.get('ai_last_success', '0') or 0),
+            'input_rub_per_1k': float(rows.get('ai_input_rub_per_1k', DEFAULT_INPUT_RUB_PER_1K) or 0),
+            'output_rub_per_1k': float(rows.get('ai_output_rub_per_1k', DEFAULT_OUTPUT_RUB_PER_1K) or 0),
+            'monthly_budget_rub': float(rows.get('ai_monthly_budget_rub', DEFAULT_MONTHLY_BUDGET_RUB) or 0),
         }
         if include_secret:
             result['api_key'] = rows.get('secret.yandex_api_key', '')
@@ -191,6 +204,19 @@ class Storage:
         folder = item.get('folder_id', '')
         model = item.get('model', '')
         api_key = item.get('api_key', '')
+        input_rate = item.get('input_rub_per_1k', DEFAULT_INPUT_RUB_PER_1K)
+        output_rate = item.get('output_rub_per_1k', DEFAULT_OUTPUT_RUB_PER_1K)
+        monthly_budget = item.get('monthly_budget_rub', DEFAULT_MONTHLY_BUDGET_RUB)
+        try:
+            input_rate = float(input_rate)
+            output_rate = float(output_rate)
+            monthly_budget = float(monthly_budget)
+        except (TypeError, ValueError):
+            raise ValueError('Проверь тарифы и месячный бюджет.') from None
+        if not 0 <= input_rate <= 1000 or not 0 <= output_rate <= 1000:
+            raise ValueError('Тариф должен быть от 0 до 1000 ₽ за 1000 токенов.')
+        if not 0 <= monthly_budget <= 10000000:
+            raise ValueError('Месячный бюджет должен быть от 0 до 10 000 000 ₽.')
         if not isinstance(folder, str) or not 10 <= len(folder.strip()) <= 64 or not folder.strip().isalnum():
             raise ValueError('Проверь идентификатор каталога Yandex Cloud.')
         allowed = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._@/-')
@@ -202,6 +228,9 @@ class Storage:
             db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)', [
                 ('ai_folder_id', folder.strip()),
                 ('ai_model', model.strip()),
+                ('ai_input_rub_per_1k', str(input_rate)),
+                ('ai_output_rub_per_1k', str(output_rate)),
+                ('ai_monthly_budget_rub', str(monthly_budget)),
             ])
             if api_key.strip():
                 db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
@@ -211,6 +240,68 @@ class Storage:
                 db.execute("DELETE FROM settings WHERE key='secret.yandex_api_key'")
                 db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
         return self.learning_state()
+
+    def usage_summary(self):
+        config = self.ai_config()
+        input_rate = config['input_rub_per_1k']
+        output_rate = config['output_rub_per_1k']
+        budget = config['monthly_budget_rub']
+        now = time.time()
+        day_cutoff = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 86400))
+        month_start = time.strftime('%Y-%m-01T00:00:00Z', time.gmtime(now))
+
+        def totals_since(cutoff, channel=None):
+            where = "created_at>=? AND role IN ('tori','qwen')"
+            params = [cutoff]
+            if channel:
+                where += ' AND channel=?'
+                params.append(channel)
+            with self.connect() as db:
+                row = db.execute(
+                    f'SELECT COALESCE(sum(input_tokens),0),COALESCE(sum(output_tokens),0) '
+                    f'FROM ai_messages WHERE {where}',
+                    params
+                ).fetchone()
+            incoming = int(row[0] or 0)
+            outgoing = int(row[1] or 0)
+            cost = incoming / 1000 * input_rate + outgoing / 1000 * output_rate
+            return {'input_tokens': incoming, 'output_tokens': outgoing, 'cost_rub': round(cost, 4)}
+
+        day = totals_since(day_cutoff)
+        month = totals_since(month_start)
+        chat_month = totals_since(month_start, 'chat')
+        learning_month = totals_since(month_start, 'learning')
+        remaining = max(0.0, budget - month['cost_rub']) if budget > 0 else None
+        blocked = budget > 0 and month['cost_rub'] >= budget
+        return {
+            'day': day,
+            'month': month,
+            'chat_month': chat_month,
+            'learning_month': learning_month,
+            'input_rub_per_1k': input_rate,
+            'output_rub_per_1k': output_rate,
+            'monthly_budget_rub': budget,
+            'remaining_rub': None if remaining is None else round(remaining, 4),
+            'blocked': blocked,
+            'period_note': '24 часа и календарный месяц UTC',
+        }
+
+    def ensure_budget(self):
+        usage = self.usage_summary()
+        if usage['blocked']:
+            raise ValueError(
+                f"Месячный лимит AI достигнут: {usage['month']['cost_rub']:.2f} ₽ "
+                f"из {usage['monthly_budget_rub']:.2f} ₽. Измени лимит в Настройках."
+            )
+        return usage
+
+    def enforce_learning_budget(self):
+        usage = self.usage_summary()
+        if usage['blocked']:
+            with self.connect() as db:
+                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                           ('learning_mode', 'paused'))
+        return usage
 
     def mark_ai_success(self):
         with self.connect() as db:
@@ -320,6 +411,7 @@ class Storage:
             'model': config['model'],
             'last_success': config['last_success'],
             'messages': self.ai_messages('chat', 100),
+            'usage': self.usage_summary(),
         }
 
     def chat_send(self, item):
@@ -328,6 +420,7 @@ class Storage:
             raise ValueError('Сообщение должно содержать от 1 до 12 000 символов.')
         use_context = item.get('use_context', True) is not False
         clean = text.strip()
+        self.ensure_budget()
         self.add_ai_message('chat', 'user', clean)
         history = self.ai_messages('chat', 14)
         transcript = []
@@ -432,6 +525,7 @@ class Storage:
             'memory_count': memory_count,
             'knowledge_count': knowledge_count,
             'stale_seconds': STALE_SECONDS,
+            'usage': self.usage_summary(),
         }
 
     def learning_control(self, action):
@@ -506,6 +600,8 @@ class Storage:
         return self.learning_state()
 
     def claim_learning(self):
+        if self.enforce_learning_budget()['blocked']:
+            return None
         with self.connect() as db:
             mode = db.execute(
                 "SELECT value FROM settings WHERE key='learning_mode'"
@@ -556,6 +652,7 @@ class Storage:
             input_tokens=input_tokens, output_tokens=output_tokens
         )
         self.mark_ai_success()
+        self.enforce_learning_budget()
         return True
 
     def fail_learning(self, queue_id, error):
