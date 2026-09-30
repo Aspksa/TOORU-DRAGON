@@ -314,18 +314,34 @@ class CoreTest(unittest.TestCase):
             'confidence': 0.84,
             'next_step': 'Добавить структурированный модуль анализа.',
         }
-        with patch('app.call_yandex_ai', return_value={
-            'text': json.dumps(payload, ensure_ascii=False),
-            'input_tokens': 50,
-            'output_tokens': 40,
-        }) as call:
+        critic = {
+            'weaknesses': ['Не оценена стоимость разработки.'],
+            'missing_evidence': ['Нет измерений качества текущих решений.'],
+            'revised_decision': 'Сначала развивать логику и измерять качество.',
+            'revised_confidence': 0.79,
+            'next_step': 'Добавить критика и метрики.',
+            'learning_gaps': [{
+                'topic': 'Оценка решений',
+                'question': 'Как измерять качество решений Тори?',
+                'reason': 'Нужна проверяемая метрика.',
+                'confidence': 0.91,
+            }],
+        }
+        with patch('app.call_yandex_ai', side_effect=[
+            {'text': json.dumps(payload, ensure_ascii=False), 'input_tokens': 50, 'output_tokens': 40},
+            {'text': json.dumps(critic, ensure_ascii=False), 'input_tokens': 30, 'output_tokens': 20},
+        ]) as call:
             result = self.request('/api/brain/reason', {
                 'problem': 'Что развивать дальше в TOORU?',
                 'use_context': True,
             })
-        self.assertEqual(call.call_args.kwargs['purpose'], 'reasoning')
-        self.assertEqual(result['items'][0]['result']['decision'], 'Сначала развивать локальную логику.')
-        self.assertAlmostEqual(result['items'][0]['result']['confidence'], 0.84, places=2)
+        self.assertEqual(call.call_args_list[0].kwargs['purpose'], 'reasoning')
+        self.assertEqual(call.call_args_list[1].kwargs['purpose'], 'critic')
+        self.assertEqual(result['items'][0]['result']['decision'], 'Сначала развивать логику и измерять качество.')
+        self.assertAlmostEqual(result['items'][0]['result']['confidence'], 0.79, places=2)
+        self.assertIn('стоимость', result['items'][0]['result']['critique']['weaknesses'][0].lower())
+        self.assertEqual(result['items'][0]['input_tokens'], 80)
+        self.assertEqual(result['items'][0]['output_tokens'], 60)
         self.assertEqual(result['items'][0]['context'][0]['title'], 'TOORU updater')
         state = self.request('/api/state')
         self.assertEqual(state['reasoning']['items'][0]['problem'], 'Что развивать дальше в TOORU?')
@@ -338,11 +354,10 @@ class CoreTest(unittest.TestCase):
             'model': 'qwen3.6-35b-a3b/latest',
             'api_key': 'secret-test-key-value',
         })
-        with patch('app.call_yandex_ai', return_value={
-            'text': 'не json',
-            'input_tokens': 5,
-            'output_tokens': 2,
-        }):
+        with patch('app.call_yandex_ai', side_effect=[
+            {'text': 'не json', 'input_tokens': 5, 'output_tokens': 2},
+            {'text': 'тоже не json', 'input_tokens': 3, 'output_tokens': 1},
+        ]):
             result = self.request('/api/brain/reason', {
                 'problem': 'Проверить неизвестную задачу',
                 'use_context': False,
@@ -510,6 +525,7 @@ class CoreTest(unittest.TestCase):
             'enabled': True,
             'min_confidence': 0.8,
             'daily_limit': 2,
+            'chain_limit': 3,
         })
         self.assertTrue(state['automation']['enabled'])
         with self.storage.connect() as db:
@@ -536,6 +552,71 @@ class CoreTest(unittest.TestCase):
         self.assertTrue(any(x['kind'] == 'memory' for x in pending))
         self.assertTrue(any(x['kind'] == 'learning' and x['topic'] == 'Python' for x in pending))
 
+    def test_brain_automation_prioritizes_learning_steps_from_active_goals(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/learning/control', {'action': 'start'})
+        self.request('/api/brain/automation', {
+            'enabled': True, 'min_confidence': 0.8, 'daily_limit': 5, 'chain_limit': 3,
+        })
+        plan = [{
+            'title': 'Изучить оценку качества',
+            'type': 'learning',
+            'topic': 'Метрики',
+            'question': 'Как оценивать качество решений?',
+            'reason': 'Нужно для цели.',
+            'status': 'pending',
+        }]
+        with self.storage.connect() as db:
+            cursor = db.execute(
+                "INSERT INTO brain_goals(title,description,plan_json,progress_json) VALUES (?,?,?,?)",
+                ('Улучшить разум', '', json.dumps(plan, ensure_ascii=False), '{}')
+            )
+            goal_id = cursor.lastrowid
+            db.execute(
+                "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                "VALUES ('learning','','SQLite','Что такое WAL?','Обычный пробел',0.95)"
+            )
+        promoted = self.storage.promote_autonomous_learning()
+        self.assertEqual(promoted['source'], 'goal')
+        state = self.request('/api/learning/status')
+        active = [x for x in state['queue'] if x['status'] in {'pending','running'}]
+        self.assertEqual(active[0]['topic'], 'Метрики')
+        with self.storage.connect() as db:
+            goal = db.execute('SELECT plan_json FROM brain_goals WHERE id=?', (goal_id,)).fetchone()
+        saved_plan = json.loads(goal['plan_json'])
+        self.assertEqual(saved_plan[0]['status'], 'queued')
+        self.assertTrue(saved_plan[0]['auto'])
+
+    def test_brain_automation_caps_same_topic_chain_depth(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/learning/control', {'action': 'start'})
+        self.request('/api/brain/automation', {
+            'enabled': True, 'min_confidence': 0.5, 'daily_limit': 10, 'chain_limit': 2,
+        })
+        today = time.strftime('%Y-%m-%d', time.gmtime())
+        with self.storage.connect() as db:
+            for index in range(2):
+                db.execute(
+                    "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence,status,decided_at) "
+                    "VALUES ('learning','','SQLite',?,?,0.9,'accepted',?)",
+                    (f'Old question {index}', 'old', today + 'T01:00:00Z')
+                )
+            db.execute(
+                "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                "VALUES ('learning','','SQLite','New question','continue',0.95)"
+            )
+        self.assertIsNone(self.storage.promote_autonomous_learning())
+        state = self.request('/api/learning/status')
+        self.assertEqual(state['queue'], [])
+
     def test_brain_automation_respects_daily_limit(self):
         self.request('/api/ai/config', {
             'folder_id': 'b1gpcfme4j9b9bv37hqb',
@@ -547,6 +628,7 @@ class CoreTest(unittest.TestCase):
             'enabled': True,
             'min_confidence': 0.5,
             'daily_limit': 1,
+            'chain_limit': 3,
         })
         with self.storage.connect() as db:
             for index in range(2):
@@ -578,11 +660,13 @@ class CoreTest(unittest.TestCase):
         review_json = {
             'verdict': 'partial',
             'confidence': 0.72,
+            'quality_score': 0.68,
             'summary': 'Ответ полезный, но не разобраны ограничения WAL.',
             'gaps': [{
                 'topic': 'SQLite WAL',
                 'question': 'Какие ограничения и недостатки есть у WAL?',
-                'reason': 'Нужно понять границы применения.'
+                'reason': 'Нужно понять границы применения.',
+                'confidence': 0.88
             }]
         }
         with patch('app.call_yandex_ai', return_value={
@@ -602,10 +686,12 @@ class CoreTest(unittest.TestCase):
         task = next(x for x in state['queue'] if x['id'] == queued['id'])
         self.assertEqual(task['review']['verdict'], 'partial')
         self.assertAlmostEqual(task['review']['confidence'], 0.72, places=2)
+        self.assertAlmostEqual(task['review']['quality_score'], 0.68, places=2)
 
         suggestions = [x for x in state['suggestions'] if x['kind'] == 'learning']
         self.assertEqual(len(suggestions), 1)
         self.assertIn('ограничения', suggestions[0]['question'].lower())
+        self.assertAlmostEqual(suggestions[0]['confidence'], 0.88, places=2)
         # Самопроверка только предлагает следующий вопрос, не ставит его в очередь сама.
         self.assertEqual(len(state['queue']), 1)
 
