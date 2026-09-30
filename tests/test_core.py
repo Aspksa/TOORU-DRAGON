@@ -115,7 +115,7 @@ class CoreTest(unittest.TestCase):
 
     def test_dragon_center_is_split_into_stable_internal_tabs(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
-        self.assertIn("const tabs={overview:'Обзор',tasks:'Задачи',project:'Проект',rights:'Права'}", ui)
+        self.assertIn("const tabs={overview:'Обзор',tasks:'Задачи',diary:'Дневник',project:'Проект',rights:'Права'}", ui)
         self.assertIn("data-dragon-tab=", ui)
         refresh_start = ui.index('async function refreshDragonNotifications')
         refresh_end = ui.index('function mainPanel', refresh_start)
