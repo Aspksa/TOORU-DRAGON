@@ -132,6 +132,28 @@ function brainSuggestionsMarkup(items){
     }).join('')}</div>
   </section>`;
 }
+function brainGoalsMarkup(goals){
+  const rows=goals||[];
+  return `<section class="brain-panel">
+    <div class="section-head"><div><span class="eyebrow">Цели Тори</span><h2>Планирование</h2></div><span class="status-label">${rows.length} активных</span></div>
+    <form id="goal-form" class="goal-form">
+      <input name="title" maxlength="300" placeholder="Цель, например: улучшить TOORU" required>
+      <textarea name="description" maxlength="8000" rows="2" placeholder="Что важно учесть?"></textarea>
+      <button class="primary">Составить план</button>
+    </form>
+    <div class="goal-list">${rows.map(goal=>`<article class="goal-card">
+      <div class="brain-card-head"><div><span class="brain-kind">Цель</span><h3>${escapeHtml(goal.title)}</h3></div><button class="mini-action" data-goal-action="done" data-goal-id="${goal.id}">Завершить</button></div>
+      ${goal.description?`<p>${escapeHtml(goal.description)}</p>`:''}
+      ${goal.progress?.summary?`<small>${escapeHtml(goal.progress.summary)}</small>`:''}
+      <div class="goal-steps">${(goal.plan||[]).map((step,index)=>{
+        const done=step.status==='done';
+        const queued=step.status==='queued';
+        const action=step.type==='learning'&&!queued&&!done?`<button class="mini-action" data-goal-action="queue_learning" data-goal-id="${goal.id}" data-step="${index}">В обучение</button>`:(!done&&!queued?`<button class="mini-action" data-goal-action="complete_step" data-goal-id="${goal.id}" data-step="${index}">Готово</button>`:'');
+        return `<div class="goal-step ${done?'is-done':''}"><span>${index+1}</span><div><strong>${escapeHtml(step.title)}</strong>${step.reason?`<small>${escapeHtml(step.reason)}</small>`:''}</div><em>${queued?'В очереди':done?'Готово':step.type==='learning'?'Нужно изучить':'Действие'}</em>${action}</div>`;
+      }).join('')}</div>
+    </article>`).join('')}</div>
+  </section>`;
+}
 function chatPanel(){
   const c=state.chat||{configured:false,messages:[]};
   const blocked=!!c.usage?.blocked;
@@ -148,7 +170,7 @@ function chatPanel(){
       </div>
     </form>
     ${!c.configured?'<p class="hint">Сначала добавь API-ключ в разделе «Настройки».</p>':blocked?'<p class="hint warning">Месячный лимит достигнут. Измени бюджет в Настройках.</p>':''}
-  </section>${brainSuggestionsMarkup(c.suggestions)}`;
+  </section>${brainSuggestionsMarkup(c.suggestions)}${brainGoalsMarkup(c.goals)}`;
 }
 function learningQueueMarkup(q){
   const labels={pending:'В очереди',running:'Получает ответ',done:'Готово',stale:'Зависла',error:'Ошибка',cancelled:'Отменена',skipped:'Пропущена'};
@@ -157,7 +179,8 @@ function learningQueueMarkup(q){
     const retry=['stale','error','cancelled','skipped'].includes(x.status)?`<button class="mini-action" data-learning-action="retry" data-learning-id="${x.id}">Повторить</button>`:'';
     const cancel=['pending','running','stale','error'].includes(x.status)?`<button class="mini-action" data-learning-action="cancel" data-learning-id="${x.id}">Отменить</button>`:'';
     const skip=['pending','stale','error'].includes(x.status)?`<button class="mini-action" data-learning-action="skip" data-learning-id="${x.id}">Пропустить</button>`:'';
-    return `<article class="queue-item"><div><span class="queue-topic">${escapeHtml(x.topic)}</span><p>${escapeHtml(x.question)}</p>${x.last_error?`<small class="queue-error">${escapeHtml(x.last_error)}</small>`:''}<div class="queue-actions">${retry}${skip}${cancel}</div></div><span class="queue-state state-${escapeHtml(x.status)}">${labels[x.status]||escapeHtml(x.status)}</span></article>`;
+    const review=x.review&&Object.keys(x.review).length?`<div class="review-box"><strong>Самопроверка: ${escapeHtml({good:'хорошо',partial:'частично',uncertain:'неуверенно'}[x.review.verdict]||x.review.verdict||'')}</strong><span>${Math.round((Number(x.review.confidence)||0)*100)}%</span>${x.review.summary?`<p>${escapeHtml(x.review.summary)}</p>`:''}</div>`:'';
+    return `<article class="queue-item"><div><span class="queue-topic">${escapeHtml(x.topic)}</span><p>${escapeHtml(x.question)}</p>${review}${x.last_error?`<small class="queue-error">${escapeHtml(x.last_error)}</small>`:''}<div class="queue-actions">${retry}${skip}${cancel}</div></div><span class="queue-state state-${escapeHtml(x.status)}">${labels[x.status]||escapeHtml(x.status)}</span></article>`;
   }).join(''):'<div class="empty-state">Очередь пуста.</div>';
 }
 function learningConversation(q){
@@ -190,7 +213,7 @@ function learningPanel(){
   <div class="learning-columns">
     <form id="learning-queue-form" class="panel clean-form"><span class="eyebrow">Новая тема</span><h2>Что изучить</h2><label for="learning-topic">Тема</label><input id="learning-topic" name="topic" maxlength="300" placeholder="Например: сети" required><label for="learning-question">Вопрос</label><textarea id="learning-question" name="question" maxlength="8000" placeholder="Что Тори должна узнать?" required></textarea><button class="primary">Добавить</button></form>
     <section class="panel compact-panel"><div class="section-head"><div><span class="eyebrow">Очередь</span><h2>План обучения</h2></div></div><div id="queue-list">${learningQueueMarkup(q)}</div></section>
-  </div>`;
+  </div>${brainSuggestionsMarkup(q.suggestions)}`;
 }
 function mainPanel(){
   const learning=state.learning||{};
@@ -240,6 +263,7 @@ content.addEventListener('click',async event=>{
     if(b.dataset.learningControl){await api('learning/control',{action:b.dataset.learningControl});await reload();render();message('Режим обучения обновлён.')}
     if(b.dataset.learningAction){await api('learning/action',{id:Number(b.dataset.learningId),action:b.dataset.learningAction});await reload();render();message('Задача обновлена.')}
     if(b.dataset.brainAction){await api('brain/action',{id:Number(b.dataset.brainId),action:b.dataset.brainAction});await reload();render();message(b.dataset.brainAction==='accept'?'Предложение применено.':'Предложение отклонено.')}
+    if(b.dataset.goalAction){await api('brain/goal/action',{id:Number(b.dataset.goalId),action:b.dataset.goalAction,step:b.dataset.step===undefined?null:Number(b.dataset.step)});await reload();render();message('Цель обновлена.')}
     if(b.hasAttribute('data-ai-test')){const result=await api('ai/test',{});await reload();render();message('AI Studio отвечает: '+result.answer)}
     if(b.hasAttribute('data-backup')){const result=await api('backup',{});message('Копия создана: data/backups/'+result.filename)}
     if(b.hasAttribute('data-diagnose')){const d=await api('diagnostics');const pairs=[['База',d.database==='ok'?'OK':d.database],['Python',d.python],['SQLite',d.sqlite],['AI',d.ai],['Модель',d.qwen],['Доступ',d.access]];const el=document.getElementById('diagnostic-result');if(el)el.innerHTML='<dl>'+pairs.map(([a,v])=>`<dt>${escapeHtml(a)}</dt><dd>${escapeHtml(v)}</dd>`).join('')+'</dl>'}
@@ -254,6 +278,7 @@ content.addEventListener('submit',async event=>{
     if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
     if(f.id==='learning-queue-form')await api('learning/queue',values);
+    if(f.id==='goal-form')await api('brain/goal',values);
     if(f.id==='chat-form'){await api('chat/send',{text:values.text,use_context:values.use_context==='1',analyze:values.analyze==='1'});f.reset();for(const name of ['use_context','analyze']){const toggle=f.querySelector('[name="'+name+'"]');if(toggle)toggle.checked=true}}
     await reload();render();
     message(f.id==='chat-form'?'Тори ответила.':'Сохранено.');

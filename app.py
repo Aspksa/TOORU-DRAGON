@@ -40,7 +40,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 6:
+            if version > 7:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -62,6 +62,7 @@ class Storage:
                     last_error TEXT NOT NULL DEFAULT '',
                     input_tokens INTEGER NOT NULL DEFAULT 0,
                     output_tokens INTEGER NOT NULL DEFAULT 0,
+                    review_json TEXT NOT NULL DEFAULT '{}',
                     context_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -94,6 +95,18 @@ class Storage:
                 );
                 CREATE INDEX IF NOT EXISTS brain_suggestions_status_id
                     ON brain_suggestions(status, id DESC);
+                CREATE TABLE IF NOT EXISTS brain_goals (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    plan_json TEXT NOT NULL DEFAULT '[]',
+                    progress_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS brain_goals_status_id
+                    ON brain_goals(status, id DESC);
             ''')
             if version < 3:
                 old_queue = db.execute(
@@ -164,6 +177,25 @@ class Storage:
                         ON brain_suggestions(status, id DESC);
                 """)
                 db.execute('PRAGMA user_version=6')
+            if version < 7:
+                columns = {row['name'] for row in db.execute('PRAGMA table_info(learning_queue)').fetchall()}
+                if 'review_json' not in columns:
+                    db.execute("ALTER TABLE learning_queue ADD COLUMN review_json TEXT NOT NULL DEFAULT '{}'")
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS brain_goals (
+                        id INTEGER PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        plan_json TEXT NOT NULL DEFAULT '[]',
+                        progress_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS brain_goals_status_id
+                        ON brain_goals(status, id DESC);
+                """)
+                db.execute('PRAGMA user_version=7')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
@@ -445,6 +477,149 @@ class Storage:
                 break
         return result
 
+    @staticmethod
+    def _parse_json_object(text):
+        if not isinstance(text, str):
+            return {}
+        clean = text.strip()
+        if clean.startswith('```'):
+            clean = re.sub(r'^```(?:json)?\\s*|\\s*```$', '', clean, flags=re.I | re.S).strip()
+        try:
+            data = json.loads(clean)
+        except (ValueError, TypeError):
+            start, end = clean.find('{'), clean.rfind('}')
+            if start < 0 or end <= start:
+                return {}
+            try:
+                data = json.loads(clean[start:end + 1])
+            except (ValueError, TypeError):
+                return {}
+        return data if isinstance(data, dict) else {}
+
+    def brain_goals(self, status='active', limit=20):
+        if status not in {'active', 'done', 'archived', 'all'}:
+            raise ValueError('Неизвестный статус целей.')
+        query = 'SELECT id,title,description,status,plan_json,progress_json,created_at,updated_at FROM brain_goals'
+        params = []
+        if status != 'all':
+            query += ' WHERE status=?'
+            params.append(status)
+        query += ' ORDER BY id DESC LIMIT ?'
+        params.append(max(1, min(int(limit), 100)))
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(query, params)]
+        for row in rows:
+            try:
+                row['plan'] = json.loads(row.pop('plan_json') or '[]')
+                if not isinstance(row['plan'], list):
+                    row['plan'] = []
+            except (ValueError, TypeError):
+                row['plan'] = []
+            try:
+                row['progress'] = json.loads(row.pop('progress_json') or '{}')
+                if not isinstance(row['progress'], dict):
+                    row['progress'] = {}
+            except (ValueError, TypeError):
+                row['progress'] = {}
+        return rows
+
+    def create_goal(self, item):
+        title = item.get('title', '')
+        description = item.get('description', '')
+        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 300:
+            raise ValueError('Цель должна содержать от 1 до 300 символов.')
+        if not isinstance(description, str) or len(description) > 8000:
+            raise ValueError('Описание цели должно быть не длиннее 8 000 символов.')
+        self.ensure_budget()
+        prompt = (
+            'Разбей цель пользователя на короткий практичный план. Верни только JSON: '
+            '{"summary":"...","steps":[{"title":"...","type":"action|learning",' 
+            '"topic":"...","question":"...","reason":"..."}]}. '
+            'Максимум 7 шагов. type=learning используй только если действительно не хватает знаний; '
+            'для learning обязательно заполни topic и question. Ничего не запускай сам.\n\n'
+            'Цель: ' + title.strip() + '\nОписание: ' + description.strip()
+        )
+        result = call_yandex_ai(self, prompt, max_output_tokens=900, purpose='planning')
+        self.add_ai_message('brain', 'system', 'Планирование цели',
+                            input_tokens=result['input_tokens'], output_tokens=result['output_tokens'])
+        data = self._parse_json_object(result['text'])
+        raw_steps = data.get('steps', []) if isinstance(data.get('steps'), list) else []
+        steps = []
+        for raw in raw_steps[:7]:
+            if not isinstance(raw, dict):
+                continue
+            step_type = raw.get('type')
+            if step_type not in {'action', 'learning'}:
+                continue
+            step = {
+                'title': str(raw.get('title') or '').strip()[:300],
+                'type': step_type,
+                'topic': str(raw.get('topic') or '').strip()[:300],
+                'question': str(raw.get('question') or '').strip()[:8000],
+                'reason': str(raw.get('reason') or '').strip()[:1000],
+                'status': 'pending',
+            }
+            if not step['title']:
+                continue
+            if step_type == 'learning' and (not step['topic'] or not step['question']):
+                continue
+            steps.append(step)
+        if not steps:
+            steps = [{'title': 'Уточнить следующий шаг', 'type': 'action',
+                      'topic': '', 'question': '', 'reason': 'План модели оказался пустым.',
+                      'status': 'pending'}]
+        summary = str(data.get('summary') or '').strip()[:2000]
+        with self.connect() as db:
+            cursor = db.execute(
+                'INSERT INTO brain_goals(title,description,plan_json,progress_json) VALUES (?,?,?,?)',
+                (title.strip(), description.strip(), json.dumps(steps, ensure_ascii=False),
+                 json.dumps({'summary': summary}, ensure_ascii=False))
+            )
+        return {'id': cursor.lastrowid, 'goals': self.brain_goals('active', 20)}
+
+    def goal_action(self, item):
+        goal_id = item.get('id')
+        action = item.get('action')
+        step_index = item.get('step')
+        if type(goal_id) is not int:
+            raise ValueError('Некорректная цель.')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM brain_goals WHERE id=?', (goal_id,)).fetchone()
+        if not row:
+            raise ValueError('Цель не найдена.')
+        row = dict(row)
+        try:
+            plan = json.loads(row['plan_json'] or '[]')
+        except (ValueError, TypeError):
+            plan = []
+        if action in {'done', 'archive'}:
+            new_status = 'done' if action == 'done' else 'archived'
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE brain_goals SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (new_status, goal_id)
+                )
+            return {'ok': True, 'status': new_status}
+        if type(step_index) is not int or not 0 <= step_index < len(plan):
+            raise ValueError('Шаг цели не найден.')
+        step = plan[step_index]
+        if action == 'complete_step':
+            step['status'] = 'done'
+        elif action == 'queue_learning':
+            if step.get('type') != 'learning':
+                raise ValueError('Этот шаг не является обучением.')
+            queued = self.learning_enqueue({'topic': step.get('topic', ''), 'question': step.get('question', '')})
+            step['status'] = 'queued'
+            step['queue_id'] = queued['id']
+        else:
+            raise ValueError('Неизвестное действие цели.')
+        with self.connect() as db:
+            db.execute(
+                "UPDATE brain_goals SET plan_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (json.dumps(plan, ensure_ascii=False), goal_id)
+            )
+        return {'ok': True, 'goals': self.brain_goals('active', 20)}
+
     def brain_suggestions(self, status='pending', limit=30):
         if status not in {'pending', 'accepted', 'rejected', 'all'}:
             raise ValueError('Неизвестный статус предложений.')
@@ -587,6 +762,7 @@ class Storage:
             'messages': self.ai_messages('chat', 100),
             'usage': self.usage_summary(),
             'suggestions': self.brain_suggestions('pending', 20),
+            'goals': self.brain_goals('active', 20),
         }
 
     def chat_send(self, item):
@@ -683,7 +859,7 @@ class Storage:
             ).fetchall())
             queue = [dict(row) for row in db.execute(
                 'SELECT id,topic,question,status,attempts,substr(response_text,1,1200) AS response_text,'
-                'last_error,input_tokens,output_tokens,created_at,updated_at '
+                'last_error,input_tokens,output_tokens,review_json,created_at,updated_at '
                 'FROM learning_queue ORDER BY id DESC LIMIT 100'
             )]
             memory_count = db.execute(
@@ -692,6 +868,13 @@ class Storage:
             knowledge_count = db.execute(
                 "SELECT count(*) FROM records WHERE kind='knowledge'"
             ).fetchone()[0]
+        for row in queue:
+            try:
+                row['review'] = json.loads(row.pop('review_json') or '{}')
+                if not isinstance(row['review'], dict):
+                    row['review'] = {}
+            except (ValueError, TypeError):
+                row['review'] = {}
         return {
             'mode': settings.get('learning_mode', 'stopped'),
             'configured': bool(settings.get('secret.yandex_api_key')),
@@ -705,6 +888,7 @@ class Storage:
             'knowledge_count': knowledge_count,
             'stale_seconds': STALE_SECONDS,
             'usage': self.usage_summary(),
+            'suggestions': self.brain_suggestions('pending', 20),
         }
 
     def learning_control(self, action):
@@ -804,7 +988,71 @@ class Storage:
             ).rowcount
             return dict(row) if changed else None
 
-    def complete_learning(self, queue_id, text, input_tokens=0, output_tokens=0):
+    def review_learning_answer(self, topic, question, answer):
+        if self.usage_summary()['blocked']:
+            return {}
+        prompt = (
+            'Проверь качество учебного ответа. Верни только JSON: '
+            '{"verdict":"good|partial|uncertain","confidence":0.0,'
+            '"summary":"...","gaps":[{"topic":"...","question":"...","reason":"..."}]}. '
+            'Оцени полноту и внутреннюю непротиворечивость. Не придумывай внешнюю проверку источников, '
+            'если её не было. gaps — максимум 2 действительно полезных уточняющих вопроса.\n\n'
+            'Тема: ' + topic + '\nВопрос: ' + question + '\nОтвет:\n' + answer[:12000]
+        )
+        try:
+            result = call_yandex_ai(self, prompt, max_output_tokens=600, purpose='review')
+        except Exception as exc:
+            logging.warning('Learning review failed: %s', exc)
+            return {}
+        self.add_ai_message('brain', 'system', 'Самопроверка знания',
+                            input_tokens=result['input_tokens'], output_tokens=result['output_tokens'])
+        data = self._parse_json_object(result['text'])
+        verdict = data.get('verdict') if data.get('verdict') in {'good','partial','uncertain'} else 'uncertain'
+        try:
+            confidence = max(0.0, min(float(data.get('confidence', 0)), 1.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        review = {
+            'verdict': verdict,
+            'confidence': confidence,
+            'summary': str(data.get('summary') or '').strip()[:2000],
+            'gaps': [],
+        }
+        gaps = data.get('gaps', []) if isinstance(data.get('gaps'), list) else []
+        for raw in gaps[:2]:
+            if not isinstance(raw, dict):
+                continue
+            gap = {
+                'topic': str(raw.get('topic') or topic).strip()[:300],
+                'question': str(raw.get('question') or '').strip()[:8000],
+                'reason': str(raw.get('reason') or '').strip()[:1000],
+            }
+            if gap['topic'] and gap['question']:
+                review['gaps'].append(gap)
+        return review
+
+    def create_review_suggestions(self, review):
+        gaps = review.get('gaps', []) if isinstance(review, dict) else []
+        created = 0
+        with self.connect() as db:
+            for gap in gaps[:2]:
+                duplicate = db.execute(
+                    "SELECT 1 FROM brain_suggestions WHERE status='pending' AND kind='learning' "
+                    "AND lower(topic)=lower(?) AND lower(question)=lower(?) LIMIT 1",
+                    (gap['topic'], gap['question'])
+                ).fetchone()
+                if duplicate:
+                    continue
+                db.execute(
+                    "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                    "VALUES ('learning','',?,?,?,?)",
+                    (gap['topic'], gap['question'], gap.get('reason',''),
+                     float(review.get('confidence', 0) or 0))
+                )
+                created += 1
+        return created
+
+    def complete_learning(self, queue_id, text, input_tokens=0, output_tokens=0, review=None):
         clean = text.strip()
         if not clean:
             raise ValueError('AI Studio вернула пустой ответ.')
@@ -817,9 +1065,10 @@ class Storage:
             model = db.execute("SELECT value FROM settings WHERE key='ai_model'").fetchone()[0]
             db.execute(
                 "UPDATE learning_queue SET status='done',response_text=?,last_error='',"
-                "input_tokens=?,output_tokens=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "input_tokens=?,output_tokens=?,review_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
                 "WHERE id=?",
-                (clean[:50000], int(input_tokens or 0), int(output_tokens or 0), queue_id)
+                (clean[:50000], int(input_tokens or 0), int(output_tokens or 0),
+                 json.dumps(review or {}, ensure_ascii=False), queue_id)
             )
             db.execute(
                 'INSERT INTO records(kind,title,body,source) VALUES (?,?,?,?)',
@@ -831,6 +1080,8 @@ class Storage:
             input_tokens=input_tokens, output_tokens=output_tokens
         )
         self.mark_ai_success()
+        if review:
+            self.create_review_suggestions(review)
         self.enforce_learning_budget()
         return True
 
@@ -904,9 +1155,14 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
             'Не утверждай, что помнишь данные, которых нет в переданной истории. '
             'Если информации недостаточно, скажи об этом прямо.'
         )
-    elif purpose == 'reflection':
+    elif purpose in {'reflection', 'planning', 'review'}:
+        labels = {
+            'reflection': 'внутренний аналитический модуль Тори',
+            'planning': 'планировщик целей Тори',
+            'review': 'модуль самопроверки знаний Тори',
+        }
         instructions = (
-            'Ты внутренний аналитический модуль Тори. '
+            'Ты ' + labels[purpose] + '. '
             'Не разговаривай с пользователем. Возвращай только валидный JSON без Markdown.'
         )
     else:
@@ -982,9 +1238,12 @@ class LearningWorker(threading.Thread):
                 continue
             try:
                 result = call_yandex_ai(self.storage, item['question'], item['topic'], purpose='learning')
+                review = self.storage.review_learning_answer(
+                    item['topic'], item['question'], result['text']
+                )
                 self.storage.complete_learning(
                     item['id'], result['text'],
-                    result['input_tokens'], result['output_tokens']
+                    result['input_tokens'], result['output_tokens'], review
                 )
             except Exception as exc:
                 logging.warning('Learning task %s failed: %s', item['id'], exc)
@@ -1124,6 +1383,10 @@ def make_server(storage, port=8765):
                     self.send(200, storage.chat_send(item))
                 elif self.path == '/api/brain/action':
                     self.send(200, storage.decide_brain_suggestion(item))
+                elif self.path == '/api/brain/goal':
+                    self.send(201, storage.create_goal(item))
+                elif self.path == '/api/brain/goal/action':
+                    self.send(200, storage.goal_action(item))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
                 else:
