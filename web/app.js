@@ -51,8 +51,13 @@ function aiSettings(){
       <input id="ai-model" name="model" maxlength="120" value="${escapeHtml(q.model||'')}" required>
       <label for="ai-key">API-ключ</label>
       <input id="ai-key" name="api_key" type="password" maxlength="500" autocomplete="off" placeholder="${q.configured?'Ключ сохранён — оставь пустым, чтобы не менять':'Вставь API-ключ'}">
+      <div class="budget-fields">
+        <label>Вход, ₽ / 1000 токенов<input name="input_rub_per_1k" type="number" min="0" max="1000" step="0.01" value="${q.usage?.input_rub_per_1k??0.2}"></label>
+        <label>Выход, ₽ / 1000 токенов<input name="output_rub_per_1k" type="number" min="0" max="1000" step="0.01" value="${q.usage?.output_rub_per_1k??0.3}"></label>
+        <label>Лимит в месяц, ₽<input name="monthly_budget_rub" type="number" min="0" max="10000000" step="1" value="${q.usage?.monthly_budget_rub??1000}"></label>
+      </div>
       <div class="form-actions"><button class="primary" type="submit">Сохранить</button><button class="action" type="button" data-ai-test ${q.configured?'':'disabled'}>Проверить связь</button></div>
-      <p class="hint">Ключ хранится только в локальной базе и не показывается обратно.</p>
+      <p class="hint">0 ₽ в поле лимита отключает блокировку. Текущий тариф Qwen3.6 35B: 0,2 ₽ вход / 0,3 ₽ выход за 1000 токенов.</p>
     </form>
   </section>`;
 }
@@ -92,19 +97,33 @@ function chatMessages(c){
     return `<article class="chat-message ${side}"><div class="chat-author">${role}</div><div class="chat-bubble">${escapeHtml(x.text)}</div>${context}<div class="chat-meta">${escapeHtml(fmtDate(x.created_at))}${usage}</div></article>`;
   }).join('');
 }
+function usageStrip(usage){
+  if(!usage)return '';
+  const limit=usage.monthly_budget_rub||0;
+  const spent=usage.month?.cost_rub||0;
+  const pct=limit>0?Math.min(100,spent/limit*100):0;
+  return `<div class="usage-strip ${usage.blocked?'is-blocked':''}">
+    <div><span>24 часа</span><strong>${(usage.day?.cost_rub||0).toFixed(2)} ₽</strong></div>
+    <div><span>Месяц</span><strong>${spent.toFixed(2)} ₽${limit>0?' / '+limit.toFixed(0)+' ₽':''}</strong></div>
+    <div><span>Токены</span><strong>${(usage.month?.input_tokens||0)+(usage.month?.output_tokens||0)}</strong></div>
+    ${limit>0?`<div class="usage-progress"><i style="width:${pct}%"></i></div>`:''}
+  </div>`;
+}
 function chatPanel(){
   const c=state.chat||{configured:false,messages:[]};
+  const blocked=!!c.usage?.blocked;
   return `<section class="conversation-shell">
     <div class="conversation-head"><div><span class="eyebrow">Личный помощник</span><h2>Чат с Тори</h2></div><span class="status-label ${c.last_success>0?'ok':''}">${!c.configured?'Настрой AI Studio':c.last_success>0?'Онлайн':'Готова'}</span></div>
+    ${usageStrip(c.usage)}
     <div class="chat-stream" id="chat-stream">${chatMessages(c)}</div>
     <form id="chat-form" class="chat-composer">
-      <textarea name="text" maxlength="12000" rows="2" placeholder="Напиши Тори…" required ${c.configured?'':'disabled'}></textarea>
+      <textarea name="text" maxlength="12000" rows="2" placeholder="${blocked?'Месячный лимит AI достигнут':'Напиши Тори…'}" required ${c.configured&&!blocked?'':'disabled'}></textarea>
       <div class="composer-side">
         <label class="context-toggle"><input type="checkbox" name="use_context" value="1" checked> Память и знания</label>
-        <button class="primary" ${c.configured?'':'disabled'}>Отправить</button>
+        <button class="primary" ${c.configured&&!blocked?'':'disabled'}>Отправить</button>
       </div>
     </form>
-    ${c.configured?'':'<p class="hint">Сначала добавь API-ключ в разделе «Настройки».</p>'}
+    ${!c.configured?'<p class="hint">Сначала добавь API-ключ в разделе «Настройки».</p>':blocked?'<p class="hint warning">Месячный лимит достигнут. Измени бюджет в Настройках.</p>':''}
   </section>`;
 }
 function learningQueueMarkup(q){
@@ -140,6 +159,7 @@ function learningPanel(){
       <div class="status-chip"><i class="status-dot is-idle"></i><span>Очередь</span><strong id="queue-status">${active}</strong></div>
       <div class="status-chip"><i class="status-dot is-on"></i><span>Знания</span><strong id="memory-status">${q.knowledge_count||0}</strong></div>
     </div>
+    ${usageStrip(q.usage)}
     <div class="learning-controls"><div class="segmented"><button class="action mode-button" data-learning-control="start" ${startDisabled}>▶ Начать</button><button class="action mode-button" data-learning-control="pause" ${pauseDisabled}>Ⅱ Пауза</button><button class="action mode-button" data-learning-control="stop" ${stopDisabled}>■ Стоп</button></div><span class="hint">Зависшие задачи отмечаются автоматически.</span></div>
   </section>
   <section class="conversation-shell learning-chat"><div class="conversation-head"><div><span class="eyebrow">Живой журнал</span><h2>Разговор обучения</h2></div><span class="status-label">${(q.messages||[]).length} сообщений</span></div><div class="chat-stream" id="learning-chat-stream">${learningConversation(q)}</div></section>
