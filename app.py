@@ -41,7 +41,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 9:
+            if version > 10:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -139,6 +139,18 @@ class Storage:
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 CREATE INDEX IF NOT EXISTS dragon_actions_id ON dragon_actions(id DESC);
+                CREATE TABLE IF NOT EXISTS dragon_tasks (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS dragon_tasks_status_id
+                    ON dragon_tasks(status, id);
             ''')
             if version < 3:
                 old_queue = db.execute(
@@ -268,6 +280,22 @@ class Storage:
                     CREATE INDEX IF NOT EXISTS dragon_actions_id ON dragon_actions(id DESC);
                 """)
                 db.execute('PRAGMA user_version=9')
+            if version < 10:
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS dragon_tasks (
+                        id INTEGER PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        action_type TEXT NOT NULL,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        result_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS dragon_tasks_status_id
+                        ON dragon_tasks(status, id);
+                """)
+                db.execute('PRAGMA user_version=10')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
@@ -291,6 +319,7 @@ class Storage:
                 ('dragon_update_check', '1'),
                 ('dragon_notifications', '1'),
                 ('dragon_delete_files', '0'),
+                ('dragon_mode', 'suggest'),
             ):
                 db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', (key, value))
 
@@ -1892,6 +1921,173 @@ class Storage:
                                    [(value,) for value in clean])
         return {'ok': True}
 
+    def dragon_mode(self):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='dragon_mode'").fetchone()
+        value = row[0] if row else 'suggest'
+        return value if value in {'observe','suggest','execute'} else 'suggest'
+
+    def save_dragon_mode(self, mode):
+        if mode not in {'observe','suggest','execute'}:
+            raise ValueError('Неизвестный режим Дракончика Тоору.')
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('dragon_mode', mode))
+        self.dragon_notify('success', 'Режим изменён', {
+            'observe':'Дракончик только наблюдает.',
+            'suggest':'Дракончик предлагает действия, но ждёт запуска.',
+            'execute':'Дракончик может выполнять разрешённые задачи из очереди.'
+        }[mode], action='mode')
+        return self.dragon_status()
+
+    def dragon_skills(self):
+        permissions = self.dragon_permissions()
+        return [
+            {'id':'project_scan','title':'Проверка проекта','description':'Просматривает доступную структуру проекта.','available':permissions['project_read']},
+            {'id':'file_read','title':'Чтение файлов','description':'Читает разрешённые UTF-8 файлы проекта.','available':permissions['project_read']},
+            {'id':'file_write','title':'Изменение файлов','description':'Меняет текстовые файлы с резервной копией и аудитом.','available':permissions['project_write']},
+            {'id':'database_backup','title':'Резервная копия','description':'Создаёт копию локальной базы TOORU.','available':permissions['data_manage']},
+            {'id':'update_check','title':'Проверка обновлений','description':'Сравнивает локальную ревизию с GitHub main.','available':permissions['update_check']},
+            {'id':'brain','title':'Мозг и обучение','description':'Использует Разум, цели и автообучение.','available':permissions['brain_auto']},
+        ]
+
+    def dragon_tasks(self, limit=50):
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(
+                'SELECT * FROM dragon_tasks ORDER BY id DESC LIMIT ?',
+                (max(1, min(int(limit), 200)),)
+            )]
+        for row in rows:
+            for field in ('payload_json','result_json'):
+                try:
+                    row[field[:-5]] = json.loads(row.pop(field) or '{}')
+                except (ValueError, TypeError):
+                    row[field[:-5]] = {}
+        return rows
+
+    def dragon_add_task(self, item):
+        title = item.get('title', '')
+        action_type = item.get('action_type', 'note')
+        payload = item.get('payload', {})
+        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 300:
+            raise ValueError('Название задачи должно содержать от 1 до 300 символов.')
+        allowed = {'note','project_scan','file_read','file_write','database_backup','update_check'}
+        if action_type not in allowed:
+            raise ValueError('Такой навык пока нельзя ставить в очередь.')
+        if not isinstance(payload, dict):
+            raise ValueError('Параметры задачи должны быть объектом.')
+        mode = self.dragon_mode()
+        status = 'suggested' if mode == 'suggest' else 'pending'
+        if mode == 'observe':
+            status = 'suggested'
+        with self.connect() as db:
+            cursor = db.execute(
+                'INSERT INTO dragon_tasks(title,action_type,payload_json,status) VALUES (?,?,?,?)',
+                (title.strip(), action_type, json.dumps(payload, ensure_ascii=False), status)
+            )
+            task_id = cursor.lastrowid
+        self.dragon_log_action('task', str(task_id), 'Создана задача Дракончика',
+                               {'title': title.strip(), 'action_type': action_type, 'status': status})
+        return {'id': task_id, 'status': status}
+
+    def dragon_task_action(self, item):
+        task_id, action = item.get('id'), item.get('action')
+        if type(task_id) is not int or action not in {'run','cancel','retry'}:
+            raise ValueError('Некорректное действие с задачей.')
+        with self.connect() as db:
+            row = db.execute('SELECT status FROM dragon_tasks WHERE id=?', (task_id,)).fetchone()
+            if not row:
+                raise ValueError('Задача не найдена.')
+            if action == 'cancel':
+                db.execute(
+                    "UPDATE dragon_tasks SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (task_id,)
+                )
+            else:
+                db.execute(
+                    "UPDATE dragon_tasks SET status='pending',result_json='{}',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (task_id,)
+                )
+        return self.dragon_status()
+
+    def run_next_dragon_task(self):
+        if self.dragon_mode() != 'execute':
+            return None
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM dragon_tasks WHERE status='pending' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            db.execute(
+                "UPDATE dragon_tasks SET status='running',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (row['id'],)
+            )
+        task = dict(row)
+        try:
+            payload = json.loads(task.get('payload_json') or '{}')
+            if not isinstance(payload, dict):
+                payload = {}
+        except (ValueError, TypeError):
+            payload = {}
+        result = {}
+        try:
+            if task['action_type'] == 'note':
+                result = {'message':'Заметка не требует выполнения.'}
+            elif task['action_type'] == 'project_scan':
+                files = self.dragon_project_tree()
+                result = {'files': len(files), 'bytes': sum(int(x.get('size',0)) for x in files)}
+            elif task['action_type'] == 'file_read':
+                result = self.dragon_read_project_file(payload.get('path',''))
+                result = {'path': result['path'], 'chars': len(result['text'])}
+            elif task['action_type'] == 'file_write':
+                result = self.dragon_write_project_file(payload)
+            elif task['action_type'] == 'database_backup':
+                result = {'filename': self.backup()}
+            elif task['action_type'] == 'update_check':
+                status = updater.local_status(ROOT)
+                result = {
+                    'update_available': status.get('update_available', False),
+                    'installed_revision': status.get('installed_revision',''),
+                    'latest_revision': status.get('latest_revision',''),
+                }
+            else:
+                raise ValueError('Неизвестный навык задачи.')
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE dragon_tasks SET status='done',result_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (json.dumps(result, ensure_ascii=False), task['id'])
+                )
+            self.dragon_log_action(task['action_type'], str(task['id']), 'Задача Дракончика выполнена', result)
+            self.dragon_notify('success', 'Задача выполнена', task['title'], action='task')
+            return {'id': task['id'], 'status': 'done'}
+        except Exception as exc:
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE dragon_tasks SET status='error',result_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (json.dumps({'error': str(exc)}, ensure_ascii=False), task['id'])
+                )
+            self.dragon_log_action(task['action_type'], str(task['id']), 'Ошибка задачи Дракончика',
+                                   {'error': str(exc)}, status='error')
+            self.dragon_notify('error', 'Ошибка задачи', str(exc), action='task')
+            return {'id': task['id'], 'status': 'error'}
+
+    def dragon_activity(self, days=14):
+        days = max(1, min(int(days), 31))
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT substr(created_at,1,10) AS day,count(*) AS count "
+                "FROM dragon_actions WHERE created_at>=datetime('now',?) "
+                "GROUP BY substr(created_at,1,10) ORDER BY day",
+                (f'-{days-1} days',)
+            ).fetchall()
+        counts = {row['day']: row['count'] for row in rows}
+        result = []
+        now = time.time()
+        for offset in range(days-1, -1, -1):
+            day = time.strftime('%Y-%m-%d', time.gmtime(now - offset*86400))
+            result.append({'day': day, 'count': int(counts.get(day, 0))})
+        return result
+
     def dragon_status(self):
         with self.connect() as db:
             name = db.execute("SELECT value FROM settings WHERE key='dragon_name'").fetchone()
@@ -1907,12 +2103,19 @@ class Storage:
                 row['details'] = json.loads(row.pop('details_json') or '{}')
             except (ValueError, TypeError):
                 row['details'] = {}
+        tasks = self.dragon_tasks(50)
+        running = next((task for task in tasks if task['status'] == 'running'), None)
         return {
             'name': name[0] if name else 'Дракончик Тоору',
             'permissions': self.dragon_permissions(),
+            'mode': self.dragon_mode(),
             'unread_notifications': unread,
             'notifications': self.dragon_notifications(False, 20),
             'actions': actions,
+            'tasks': tasks,
+            'skills': self.dragon_skills(),
+            'activity': self.dragon_activity(14),
+            'current': running,
         }
 
     def diagnostics(self):
@@ -2063,6 +2266,10 @@ class LearningWorker(threading.Thread):
 
     def run(self):
         while not self.stopping.wait(1.5):
+            try:
+                self.storage.run_next_dragon_task()
+            except Exception as exc:
+                logging.warning('Dragon task cycle failed: %s', exc)
             try:
                 self.storage.promote_autonomous_learning()
             except Exception as exc:
@@ -2244,6 +2451,12 @@ def make_server(storage, port=8765):
                     self.send(200, storage.goal_action(item))
                 elif self.path == '/api/dragon/permissions':
                     self.send(200, storage.save_dragon_permissions(item))
+                elif self.path == '/api/dragon/mode':
+                    self.send(200, storage.save_dragon_mode(item.get('mode')))
+                elif self.path == '/api/dragon/task':
+                    self.send(201, storage.dragon_add_task(item))
+                elif self.path == '/api/dragon/task/action':
+                    self.send(200, storage.dragon_task_action(item))
                 elif self.path == '/api/dragon/project/read':
                     self.send(200, storage.dragon_read_project_file(item.get('path', '')))
                 elif self.path == '/api/dragon/project/write':
