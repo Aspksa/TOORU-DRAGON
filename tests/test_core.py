@@ -1212,22 +1212,6 @@ class CoreTest(unittest.TestCase):
             'model': 'qwen3.6-35b-a3b/latest',
             'api_key': 'secret-test-key-value',
         })
-        self.request('/api/brain/automation', {
-            'enabled': True,
-            'min_confidence': 0.75,
-            'daily_limit': 5,
-            'chain_limit': 3,
-        })
-        created = []
-        for index in range(4):
-            created.append(self.storage.create_brain_experiment({
-                'hypothesis': f'Проверяемая гипотеза {index}',
-                'experiment_type': 'knowledge_check',
-                'plan': 'Проверить локальные знания.',
-                'expected_result': 'Получить проверяемые данные.',
-                'confidence_before': 0.5,
-                'auto_allowed': True,
-            })['id'])
         verdict = {
             'verdict': 'inconclusive',
             'actual_result': 'Недостаточно локальных данных.',
@@ -1238,6 +1222,22 @@ class CoreTest(unittest.TestCase):
             'text': json.dumps(verdict, ensure_ascii=False),
             'input_tokens': 5, 'output_tokens': 4,
         }):
+            self.request('/api/brain/automation', {
+                'enabled': True,
+                'min_confidence': 0.75,
+                'daily_limit': 5,
+                'chain_limit': 3,
+            })
+            created = []
+            for index in range(4):
+                created.append(self.storage.create_brain_experiment({
+                    'hypothesis': f'Проверяемая гипотеза {index}',
+                    'experiment_type': 'knowledge_check',
+                    'plan': 'Проверить локальные знания.',
+                    'expected_result': 'Получить проверяемые данные.',
+                    'confidence_before': 0.5,
+                    'auto_allowed': True,
+                })['id'])
             for _ in range(4):
                 self.storage.promote_autonomous_experiment()
         state = self.storage.brain_lab_state()
