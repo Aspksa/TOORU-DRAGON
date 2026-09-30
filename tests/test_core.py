@@ -1097,7 +1097,7 @@ class CoreTest(unittest.TestCase):
         self.assertTrue({'area','active_task','last_decision','next_step','source','updated_at'} <= context_columns)
         self.assertTrue({'hypothesis','experiment_type','plan','expected_result','actual_result',
                          'verdict','confidence_before','confidence_after','lesson','reasoning_id',
-                         'status','created_at','updated_at'} <= experiment_columns)
+                         'auto_allowed','status','created_at','updated_at'} <= experiment_columns)
 
     def test_work_context_persists_and_is_visible_in_state(self):
         original = self.storage.work_context()
@@ -1168,6 +1168,7 @@ class CoreTest(unittest.TestCase):
         experiment = next(x for x in lab['experiments'] if x['id'] == result['experiment_id'])
         self.assertEqual(experiment['experiment_type'], 'project_scan')
         self.assertEqual(experiment['status'], 'planned')
+        self.assertTrue(experiment['auto_allowed'])
         self.assertIn('Проверить кеш', lab['context']['last_decision'])
         self.assertIn('минимальную проверку', lab['context']['next_step'])
 
@@ -1225,6 +1226,7 @@ class CoreTest(unittest.TestCase):
                 'plan': 'Проверить локальные знания.',
                 'expected_result': 'Получить проверяемые данные.',
                 'confidence_before': 0.5,
+                'auto_allowed': True,
             })['id'])
         verdict = {
             'verdict': 'inconclusive',
