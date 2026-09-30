@@ -625,10 +625,63 @@ class Storage:
             normalized['confidence'] = max(0.0, min(float(data.get('confidence', 0)), 1.0))
         except (TypeError, ValueError):
             normalized['confidence'] = 0.0
+
+        # Второй независимый проход: критик ищет слабые места и может скорректировать вывод.
+        critic_prompt = (
+            'Проверь структурированный разбор другой модели. Не показывай скрытую цепочку рассуждений. '
+            'Верни только JSON: {"weaknesses":["..."],"missing_evidence":["..."],'
+            '"revised_decision":"...","revised_confidence":0.0,"next_step":"...",'
+            '"learning_gaps":[{"topic":"...","question":"...","reason":"...","confidence":0.0}]}. '
+            'Не соглашайся автоматически. Ищи логические скачки, неподтверждённые предположения и недостающие данные. '
+            'learning_gaps — максимум 2 темы, которые реально могут улучшить решение.\n\n'
+            'Исходная задача:\n' + clean + '\n\nРазбор:\n'
+            + json.dumps(normalized, ensure_ascii=False)
+        )
+        critic = call_yandex_ai(self, critic_prompt, max_output_tokens=900, purpose='critic')
+        critique = self._parse_json_object(critic['text'])
+        weaknesses = critique.get('weaknesses', []) if isinstance(critique.get('weaknesses'), list) else []
+        missing = critique.get('missing_evidence', []) if isinstance(critique.get('missing_evidence'), list) else []
+        normalized['critique'] = {
+            'weaknesses': [str(x).strip()[:1000] for x in weaknesses[:6] if str(x).strip()],
+            'missing_evidence': [str(x).strip()[:1000] for x in missing[:6] if str(x).strip()],
+        }
+        revised_decision = str(critique.get('revised_decision') or '').strip()[:4000]
+        if revised_decision:
+            normalized['decision'] = revised_decision
+        revised_next = str(critique.get('next_step') or '').strip()[:2000]
+        if revised_next:
+            normalized['next_step'] = revised_next
+        try:
+            revised_confidence = max(0.0, min(float(critique.get('revised_confidence', normalized['confidence'])), 1.0))
+        except (TypeError, ValueError):
+            revised_confidence = normalized['confidence']
+        normalized['confidence'] = revised_confidence
+
+        learning_gaps = []
+        raw_gaps = critique.get('learning_gaps', []) if isinstance(critique.get('learning_gaps'), list) else []
+        for raw in raw_gaps[:2]:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                gap_confidence = max(0.0, min(float(raw.get('confidence', 0)), 1.0))
+            except (TypeError, ValueError):
+                gap_confidence = 0.0
+            gap = {
+                'topic': str(raw.get('topic') or '').strip()[:300],
+                'question': str(raw.get('question') or '').strip()[:8000],
+                'reason': str(raw.get('reason') or '').strip()[:1000],
+                'confidence': gap_confidence,
+            }
+            if gap['topic'] and gap['question']:
+                learning_gaps.append(gap)
+        normalized['learning_gaps'] = learning_gaps
+
         visible_context = [
             {'id': entry['id'], 'kind': entry['kind'], 'title': entry['title'], 'source': entry['source']}
             for entry in context
         ]
+        total_input = int(result['input_tokens'] or 0) + int(critic['input_tokens'] or 0)
+        total_output = int(result['output_tokens'] or 0) + int(critic['output_tokens'] or 0)
         with self.connect() as db:
             cursor = db.execute(
                 'INSERT INTO brain_reasoning(problem,result_json,context_json,input_tokens,output_tokens) '
@@ -637,14 +690,27 @@ class Storage:
                     clean,
                     json.dumps(normalized, ensure_ascii=False),
                     json.dumps(visible_context, ensure_ascii=False),
-                    int(result['input_tokens'] or 0),
-                    int(result['output_tokens'] or 0),
+                    total_input,
+                    total_output,
                 )
             )
             reasoning_id = cursor.lastrowid
+            for gap in learning_gaps:
+                duplicate = db.execute(
+                    "SELECT 1 FROM brain_suggestions WHERE status='pending' AND kind='learning' "
+                    "AND lower(topic)=lower(?) AND lower(question)=lower(?) LIMIT 1",
+                    (gap['topic'], gap['question'])
+                ).fetchone()
+                if duplicate:
+                    continue
+                db.execute(
+                    "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                    "VALUES ('learning','',?,?,?,?)",
+                    (gap['topic'], gap['question'], gap['reason'], gap['confidence'])
+                )
         self.add_ai_message(
-            'brain', 'system', 'Логический анализ задачи',
-            input_tokens=result['input_tokens'], output_tokens=result['output_tokens']
+            'brain', 'system', 'Разум v2: анализ + критическая проверка',
+            input_tokens=total_input, output_tokens=total_output
         )
         self.mark_ai_success()
         state = self.reasoning_state()
