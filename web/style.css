@@ -30,3 +30,5 @@
 .compact-status{margin-bottom:16px}.simple-state{max-width:720px}.simple-state h2{margin-top:5px}
 @media(max-width:800px){.dashboard-grid,.settings-grid,.library-layout{grid-template-columns:1fr}.chat-message{max-width:90%}.conversation-head{align-items:flex-start}.chat-composer{grid-template-columns:1fr}.chat-composer button{width:100%}.welcome h2{font-size:29px}}
 @media(max-width:520px){.chat-stream{padding:16px;min-height:300px;height:55vh}.chat-message{max-width:96%}.conversation-head{padding:16px}.dashboard-card{min-height:120px}}
+
+.profile-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;width:100%;margin-top:auto}.profile-stats span{display:flex;flex-direction:column;gap:3px;padding:12px;border:1px solid var(--line);border-radius:10px;color:var(--muted);font-size:12px;background:var(--bg)}.profile-stats strong{font-size:20px;color:var(--text)}@media(max-width:520px){.profile-stats{grid-template-columns:1fr}}
