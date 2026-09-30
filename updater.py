@@ -6,6 +6,7 @@ from datetime import datetime
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ import zipfile
 REPOSITORY = "Aspksa/TOORU-DRAGON"
 BRANCH = "main"
 API_BRANCH = f"https://api.github.com/repos/{REPOSITORY}/branches/{BRANCH}"
+API_COMPARE = f"https://api.github.com/repos/{REPOSITORY}/compare"
 ZIP_URL = f"https://github.com/{REPOSITORY}/archive/refs/heads/{BRANCH}.zip"
 USER_AGENT = "TOORU-DRAGON-Updater/0.0.0"
 STATE_REL = Path("data") / "update_state.json"
@@ -60,7 +62,11 @@ def latest_revision() -> dict:
     message = nested.get("message", "") if isinstance(nested, dict) else ""
     if not isinstance(sha, str) or len(sha) < 7:
         raise RuntimeError("GitHub не вернул SHA ветки main.")
-    return {"sha": sha, "message": str(message).splitlines()[0][:200]}
+    clean_message = str(message).strip()
+    lines = clean_message.splitlines()
+    title = lines[0][:200] if lines else ""
+    description = "\n".join(line.strip() for line in lines[1:] if line.strip())[:1200]
+    return {"sha": sha, "message": title, "description": description}
 
 
 def read_json(path: Path, default):
@@ -77,6 +83,41 @@ def atomic_write_json(path: Path, payload) -> None:
     os.replace(temporary, path)
 
 
+def revision_changes(installed: str, latest: str) -> list[dict]:
+    if not installed or installed == latest:
+        return []
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", installed or ""):
+        return []
+    payload = request_json(f"{API_COMPARE}/{installed}...{latest}")
+    files = payload.get("files") if isinstance(payload, dict) else []
+    result = []
+    labels = {
+        "added": "добавлен",
+        "modified": "изменён",
+        "removed": "удалён",
+        "renamed": "переименован",
+        "copied": "скопирован",
+        "changed": "изменён",
+        "unchanged": "без изменений",
+    }
+    for item in files if isinstance(files, list) else []:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filename", "")
+        if not isinstance(filename, str) or not filename:
+            continue
+        managed = is_managed(Path(filename))
+        status = str(item.get("status", "modified"))
+        result.append({
+            "path": filename,
+            "status": status,
+            "status_label": labels.get(status, status),
+            "will_update": managed,
+            "previous_path": item.get("previous_filename", "") if status == "renamed" else "",
+        })
+    return result
+
+
 def local_status(root: Path) -> dict:
     remote = latest_revision()
     state = read_json(root / STATE_REL, {})
@@ -86,11 +127,15 @@ def local_status(root: Path) -> dict:
         version = (root / "VERSION").read_text("utf-8").strip()
     except OSError:
         pass
+    changes = revision_changes(installed, remote["sha"]) if installed else []
     return {
         "version": version or "неизвестно",
         "installed_revision": installed,
         "latest_revision": remote["sha"],
         "latest_message": remote["message"],
+        "latest_description": remote.get("description", ""),
+        "files": changes,
+        "files_available": bool(installed) and bool(re.fullmatch(r"[0-9a-fA-F]{40}", installed or "")),
         "update_available": not installed or installed != remote["sha"],
         "tracked": bool(installed),
     }
