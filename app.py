@@ -220,13 +220,14 @@ class Storage:
         with self.connect() as db:
             rows = dict(db.execute(
                 "SELECT key,value FROM settings WHERE key IN "
-                "('ai_folder_id','ai_model','ai_last_success','secret.yandex_api_key',"
+                "('ai_folder_id','ai_model','ai_last_success','ai_auth_type','secret.yandex_api_key',"
                 "'ai_input_rub_per_1k','ai_output_rub_per_1k','ai_monthly_budget_rub')"
             ).fetchall())
         result = {
             'folder_id': rows.get('ai_folder_id', DEFAULT_YANDEX_FOLDER),
             'model': rows.get('ai_model', DEFAULT_YANDEX_MODEL),
             'configured': bool(rows.get('secret.yandex_api_key')),
+            'auth_type': rows.get('ai_auth_type', 'api_key'),
             'last_success': float(rows.get('ai_last_success', '0') or 0),
             'input_rub_per_1k': float(rows.get('ai_input_rub_per_1k', DEFAULT_INPUT_RUB_PER_1K) or 0),
             'output_rub_per_1k': float(rows.get('ai_output_rub_per_1k', DEFAULT_OUTPUT_RUB_PER_1K) or 0),
@@ -240,6 +241,9 @@ class Storage:
         folder = item.get('folder_id', '')
         model = item.get('model', '')
         api_key = item.get('api_key', '')
+        auth_type = item.get('auth_type', 'api_key')
+        if auth_type not in {'api_key', 'iam_token'}:
+            raise ValueError('Неизвестный тип авторизации AI Studio.')
         input_rate = item.get('input_rub_per_1k', DEFAULT_INPUT_RUB_PER_1K)
         output_rate = item.get('output_rub_per_1k', DEFAULT_OUTPUT_RUB_PER_1K)
         monthly_budget = item.get('monthly_budget_rub', DEFAULT_MONTHLY_BUDGET_RUB)
@@ -264,6 +268,7 @@ class Storage:
             db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)', [
                 ('ai_folder_id', folder.strip()),
                 ('ai_model', model.strip()),
+                ('ai_auth_type', auth_type),
                 ('ai_input_rub_per_1k', str(input_rate)),
                 ('ai_output_rub_per_1k', str(output_rate)),
                 ('ai_monthly_budget_rub', str(monthly_budget)),
@@ -922,7 +927,7 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
         YANDEX_AI_URL,
         data=payload,
         headers={
-            'Authorization': 'Api-Key ' + config['api_key'],
+            'Authorization': ('Bearer ' if config.get('auth_type') == 'iam_token' else 'Api-Key ') + config['api_key'],
             'Content-Type': 'application/json',
             'User-Agent': 'TOORU-DRAGON/' + VERSION,
         },
@@ -938,6 +943,15 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
             detail = parsed.get('error', {}).get('message', '') if isinstance(parsed.get('error'), dict) else ''
         except Exception:
             pass
+        if exc.code == 401:
+            auth_name = 'IAM-токен' if config.get('auth_type') == 'iam_token' else 'API-ключ'
+            hint = (
+                f'AI Studio отклонила авторизацию ({auth_name}). '
+                'Проверь тип авторизации, срок действия и права ключа/токена.'
+            )
+            if detail:
+                hint += ' Yandex: ' + detail[:300]
+            raise ValueError(hint) from None
         raise ValueError(
             f'AI Studio вернула HTTP {exc.code}' + ((': ' + detail[:300]) if detail else '.')
         ) from None
