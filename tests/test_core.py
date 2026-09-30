@@ -161,15 +161,17 @@ class CoreTest(unittest.TestCase):
             'model': 'qwen3.6-35b-a3b/latest',
             'api_key': 'secret-test-key-value',
         })
-        with patch('app.call_yandex_ai', return_value={
-            'text': 'Привет! Я Тори.', 'input_tokens': 12, 'output_tokens': 6
-        }) as call:
+        with patch('app.call_yandex_ai', side_effect=[
+            {'text': 'Привет! Я Тори.', 'input_tokens': 12, 'output_tokens': 6},
+            {'text': '{"suggestions":[]}', 'input_tokens': 5, 'output_tokens': 3},
+        ]) as call:
             chat = self.request('/api/chat/send', {'text': 'Привет'})
         self.assertEqual([m['role'] for m in chat['messages'][-2:]], ['user', 'tori'])
         self.assertEqual(chat['messages'][-1]['text'], 'Привет! Я Тори.')
         self.assertEqual(chat['messages'][-1]['input_tokens'], 12)
         self.assertEqual(chat['messages'][-1]['output_tokens'], 6)
-        self.assertEqual(call.call_args.kwargs['purpose'], 'chat')
+        self.assertEqual(call.call_args_list[0].kwargs['purpose'], 'chat')
+        self.assertEqual(call.call_args_list[1].kwargs['purpose'], 'reflection')
         public = self.request('/api/state')
         self.assertEqual(public['chat']['messages'][-1]['role'], 'tori')
 
@@ -259,6 +261,98 @@ class CoreTest(unittest.TestCase):
         self.storage.add_ai_message('chat', 'tori', 'Ответ', input_tokens=500000, output_tokens=500000)
         self.assertFalse(self.storage.usage_summary()['blocked'])
 
+    def test_brain_suggestions_require_user_approval(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        reflection = {
+            'suggestions': [
+                {
+                    'kind': 'memory',
+                    'title': 'Любит краткие ответы',
+                    'body': 'Пользователь предпочитает краткие ответы.',
+                    'reason': 'Пользователь сказал это явно.',
+                    'confidence': 0.95,
+                },
+                {
+                    'kind': 'knowledge',
+                    'title': 'WAL',
+                    'body': 'WAL — журнал предзаписи SQLite.',
+                    'reason': 'Полезный материал из ответа.',
+                    'confidence': 0.8,
+                },
+                {
+                    'kind': 'learning',
+                    'topic': 'SQLite',
+                    'question': 'Когда WAL лучше rollback journal?',
+                    'reason': 'Есть полезный пробел для изучения.',
+                    'confidence': 0.75,
+                },
+            ]
+        }
+        with patch('app.call_yandex_ai', side_effect=[
+            {'text': 'Поняла.', 'input_tokens': 10, 'output_tokens': 4},
+            {'text': json.dumps(reflection, ensure_ascii=False), 'input_tokens': 20, 'output_tokens': 30},
+        ]):
+            chat = self.request('/api/chat/send', {
+                'text': 'Я люблю краткие ответы. Расскажи про WAL.',
+                'analyze': True,
+            })
+        self.assertEqual(len(chat['suggestions']), 3)
+        state = self.request('/api/state')
+        self.assertEqual(state['records']['memory'], [])
+        self.assertEqual(state['records']['knowledge'], [])
+        self.assertEqual(state['learning']['queue'], [])
+
+        by_kind = {item['kind']: item for item in chat['suggestions']}
+        self.request('/api/brain/action', {'id': by_kind['memory']['id'], 'action': 'accept'})
+        self.request('/api/brain/action', {'id': by_kind['knowledge']['id'], 'action': 'accept'})
+        self.request('/api/brain/action', {'id': by_kind['learning']['id'], 'action': 'accept'})
+        state = self.request('/api/state')
+        self.assertEqual(state['records']['memory'][0]['title'], 'Любит краткие ответы')
+        self.assertEqual(state['records']['knowledge'][0]['title'], 'WAL')
+        self.assertEqual(state['learning']['queue'][0]['topic'], 'SQLite')
+
+    def test_brain_suggestion_can_be_rejected_and_analysis_disabled(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        with patch('app.call_yandex_ai', return_value={
+            'text': 'Ответ без самоанализа.', 'input_tokens': 8, 'output_tokens': 4
+        }) as call:
+            chat = self.request('/api/chat/send', {'text': 'Тест', 'analyze': False})
+        self.assertEqual(len(call.call_args_list), 1)
+        self.assertEqual(chat['suggestions'], [])
+
+        with self.storage.connect() as db:
+            cursor = db.execute(
+                "INSERT INTO brain_suggestions(kind,title,body,reason,confidence) VALUES ('memory','Тест','Тело','Причина',0.5)"
+            )
+            suggestion_id = cursor.lastrowid
+        result = self.request('/api/brain/action', {'id': suggestion_id, 'action': 'reject'})
+        self.assertEqual(result['status'], 'rejected')
+        self.assertEqual(self.storage.brain_suggestions('pending'), [])
+
+    def test_brain_usage_is_counted_in_budget(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+            'input_rub_per_1k': 1,
+            'output_rub_per_1k': 1,
+            'monthly_budget_rub': 100,
+        })
+        self.storage.add_ai_message('brain', 'system', 'Самоанализ',
+                                    input_tokens=100, output_tokens=50)
+        usage = self.storage.usage_summary()
+        self.assertEqual(usage['month']['input_tokens'], 100)
+        self.assertEqual(usage['month']['output_tokens'], 50)
+        self.assertAlmostEqual(usage['month']['cost_rub'], 0.15, places=3)
+
     def test_extract_response_text_handles_null_content(self):
         response = {
             'output_text': None,
@@ -288,6 +382,10 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Месяц', ui)
         self.assertIn('Лимит в месяц', ui)
         self.assertIn('0,2 ₽ вход / 0,3 ₽ выход', ui)
+        self.assertIn('Мозг Тори', ui)
+        self.assertIn('Мозг: предложения', ui)
+        self.assertIn('Принять', ui)
+        self.assertIn('Отклонить', ui)
         self.assertIn('Повторить', ui)
         self.assertIn('Пропустить', ui)
         self.assertIn('Отменить', ui)
@@ -334,11 +432,14 @@ class CoreTest(unittest.TestCase):
             self.assertIn('роутер', messages[0]['text'])
             self.assertIn('пакеты', messages[1]['text'])
 
-    def test_schema_v5_has_ai_messages_with_context(self):
+    def test_schema_v6_has_brain_suggestions(self):
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 5)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 6)
             columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
         self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens','context_json'} <= columns)
+        with self.storage.connect() as db:
+            brain_columns = {row[1] for row in db.execute('PRAGMA table_info(brain_suggestions)').fetchall()}
+        self.assertTrue({'kind','title','body','topic','question','reason','confidence','status'} <= brain_columns)
 
     def test_duplicate_launcher_and_lock(self):
         lock = app.InstanceLock(Path(self.temp.name) / 'instance.lock')
