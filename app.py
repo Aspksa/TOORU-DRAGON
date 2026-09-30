@@ -888,6 +888,7 @@ class Storage:
             'knowledge_count': knowledge_count,
             'stale_seconds': STALE_SECONDS,
             'usage': self.usage_summary(),
+            'suggestions': self.brain_suggestions('pending', 20),
         }
 
     def learning_control(self, action):
