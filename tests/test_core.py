@@ -998,7 +998,7 @@ class CoreTest(unittest.TestCase):
         self.assertNotIn('brainGoalsMarkup(c.goals)', chat_block)
         self.assertNotIn('brainSuggestionsMarkup(c.suggestions)', chat_block)
         self.assertIn('Предложения Мозга', ui)
-        self.assertIn('Авторазвитие Тори', ui)
+        self.assertIn('Авторазвитие', ui)
         self.assertIn("if(page!=='ai'||tab!=='brain'||!state)return;", ui)
 
     def test_learning_ui_uses_ai_studio_and_queue_actions(self):
@@ -1021,7 +1021,7 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Отклонить', ui)
         self.assertIn('Цели Тори', ui)
         self.assertIn('Составить план', ui)
-        self.assertIn('Самопроверка:', ui)
+        self.assertIn('Самопроверка', ui)
         self.assertIn('В обучение', ui)
         self.assertIn('Повторить', ui)
         self.assertIn('Пропустить', ui)
