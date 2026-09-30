@@ -346,7 +346,7 @@ class CoreTest(unittest.TestCase):
         state = self.request('/api/state')
         self.assertEqual(state['reasoning']['items'][0]['problem'], 'Что развивать дальше в TOORU?')
         with self.storage.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 8)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 9)
 
     def test_reasoning_engine_handles_invalid_model_json_without_hidden_trace(self):
         self.request('/api/ai/config', {
@@ -886,7 +886,7 @@ class CoreTest(unittest.TestCase):
 
     def test_learning_ui_uses_ai_studio_and_queue_actions(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
-        self.assertIn('Чат с Тори', ui)
+        self.assertIn('Дракончик Тоору', ui)
         self.assertIn('Тори ↔ Qwen', ui)
         self.assertIn('Разговор обучения', ui)
         self.assertIn('AI Studio', ui)
@@ -952,7 +952,7 @@ class CoreTest(unittest.TestCase):
             self.assertIn('роутер', messages[0]['text'])
             self.assertIn('пакеты', messages[1]['text'])
 
-    def test_schema_v8_has_brain_tables(self):
+    def test_schema_v9_has_brain_and_dragon_tables(self):
         with self.storage.connect() as db:
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 8)
             columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
@@ -965,6 +965,74 @@ class CoreTest(unittest.TestCase):
             goal_columns = {row[1] for row in db.execute('PRAGMA table_info(brain_goals)').fetchall()}
         self.assertIn('review_json', queue_columns)
         self.assertTrue({'title','description','status','plan_json','progress_json'} <= goal_columns)
+        with self.storage.connect() as db:
+            notification_columns = {row[1] for row in db.execute('PRAGMA table_info(dragon_notifications)').fetchall()}
+            action_columns = {row[1] for row in db.execute('PRAGMA table_info(dragon_actions)').fetchall()}
+        self.assertTrue({'level','title','body','action','is_read','created_at'} <= notification_columns)
+        self.assertTrue({'capability','target','summary','status','details_json','created_at'} <= action_columns)
+
+    def test_dragon_permissions_notifications_and_project_access(self):
+        status = self.request('/api/dragon/status')
+        self.assertEqual(status['name'], 'Дракончик Тоору')
+        self.assertTrue(status['permissions']['project_read'])
+        self.assertTrue(status['permissions']['project_write'])
+        self.assertFalse(status['permissions']['delete_files'])
+
+        configured = self.request('/api/dragon/permissions', {
+            'project_read': True,
+            'project_write': True,
+            'data_manage': True,
+            'brain_auto': True,
+            'update_check': True,
+            'notifications': True,
+            'delete_files': False,
+        })
+        self.assertTrue(configured['permissions']['notifications'])
+        self.assertGreaterEqual(configured['unread_notifications'], 1)
+
+        tree = self.request('/api/dragon/project')
+        paths = {item['path'] for item in tree['files']}
+        self.assertIn('app.py', paths)
+        self.assertNotIn('data/tooru.sqlite3', paths)
+        self.assertFalse(any(path.startswith('python/') for path in paths))
+
+        read = self.request('/api/dragon/project/read', {'path': 'AGENTS.md'})
+        self.assertIn('TOORU', read['text'])
+
+    def test_dragon_project_write_is_guarded_and_backed_up(self):
+        target = app.ROOT / 'web' / 'dragon-test.txt'
+        original = 'до'
+        target.write_text(original, 'utf-8')
+        try:
+            result = self.request('/api/dragon/project/write', {
+                'path': 'web/dragon-test.txt',
+                'content': 'после',
+            })
+            self.assertTrue(result['ok'])
+            self.assertEqual(target.read_text('utf-8'), 'после')
+            self.assertTrue(result['backup'])
+            backup = self.storage.directory / result['backup']
+            self.assertTrue(backup.exists())
+            self.assertEqual(backup.read_text('utf-8'), original)
+            status = self.request('/api/dragon/status')
+            self.assertTrue(any(a['capability'] == 'project_write' for a in status['actions']))
+            self.assertTrue(any(n['title'] == 'Проект изменён' for n in status['notifications']))
+        finally:
+            target.unlink(missing_ok=True)
+
+        with self.assertRaisesRegex(urllib.error.HTTPError, '400'):
+            self.request('/api/dragon/project/read', {'path': 'data/tooru.sqlite3'})
+
+    def test_dragon_ui_has_permissions_and_popup_notifications(self):
+        ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
+        css = (app.ROOT / 'web' / 'style.css').read_text('utf-8')
+        self.assertIn('Права помощника', ui)
+        self.assertIn('Читать весь рабочий проект', ui)
+        self.assertIn('Изменять файлы проекта с резервной копией', ui)
+        self.assertIn('Всплывающие сообщения', ui)
+        self.assertIn('dragon-toast-host', ui)
+        self.assertIn('refreshDragonNotifications', ui)
+        self.assertIn('.dragon-toast-host', css)
 
     def test_duplicate_launcher_and_lock(self):
         lock = app.InstanceLock(Path(self.temp.name) / 'instance.lock')
