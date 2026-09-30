@@ -477,6 +477,149 @@ class Storage:
                 break
         return result
 
+    @staticmethod
+    def _parse_json_object(text):
+        if not isinstance(text, str):
+            return {}
+        clean = text.strip()
+        if clean.startswith('```'):
+            clean = re.sub(r'^```(?:json)?\\s*|\\s*```$', '', clean, flags=re.I | re.S).strip()
+        try:
+            data = json.loads(clean)
+        except (ValueError, TypeError):
+            start, end = clean.find('{'), clean.rfind('}')
+            if start < 0 or end <= start:
+                return {}
+            try:
+                data = json.loads(clean[start:end + 1])
+            except (ValueError, TypeError):
+                return {}
+        return data if isinstance(data, dict) else {}
+
+    def brain_goals(self, status='active', limit=20):
+        if status not in {'active', 'done', 'archived', 'all'}:
+            raise ValueError('Неизвестный статус целей.')
+        query = 'SELECT id,title,description,status,plan_json,progress_json,created_at,updated_at FROM brain_goals'
+        params = []
+        if status != 'all':
+            query += ' WHERE status=?'
+            params.append(status)
+        query += ' ORDER BY id DESC LIMIT ?'
+        params.append(max(1, min(int(limit), 100)))
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(query, params)]
+        for row in rows:
+            try:
+                row['plan'] = json.loads(row.pop('plan_json') or '[]')
+                if not isinstance(row['plan'], list):
+                    row['plan'] = []
+            except (ValueError, TypeError):
+                row['plan'] = []
+            try:
+                row['progress'] = json.loads(row.pop('progress_json') or '{}')
+                if not isinstance(row['progress'], dict):
+                    row['progress'] = {}
+            except (ValueError, TypeError):
+                row['progress'] = {}
+        return rows
+
+    def create_goal(self, item):
+        title = item.get('title', '')
+        description = item.get('description', '')
+        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 300:
+            raise ValueError('Цель должна содержать от 1 до 300 символов.')
+        if not isinstance(description, str) or len(description) > 8000:
+            raise ValueError('Описание цели должно быть не длиннее 8 000 символов.')
+        self.ensure_budget()
+        prompt = (
+            'Разбей цель пользователя на короткий практичный план. Верни только JSON: '
+            '{"summary":"...","steps":[{"title":"...","type":"action|learning",' 
+            '"topic":"...","question":"...","reason":"..."}]}. '
+            'Максимум 7 шагов. type=learning используй только если действительно не хватает знаний; '
+            'для learning обязательно заполни topic и question. Ничего не запускай сам.\n\n'
+            'Цель: ' + title.strip() + '\nОписание: ' + description.strip()
+        )
+        result = call_yandex_ai(self, prompt, max_output_tokens=900, purpose='planning')
+        self.add_ai_message('brain', 'system', 'Планирование цели',
+                            input_tokens=result['input_tokens'], output_tokens=result['output_tokens'])
+        data = self._parse_json_object(result['text'])
+        raw_steps = data.get('steps', []) if isinstance(data.get('steps'), list) else []
+        steps = []
+        for raw in raw_steps[:7]:
+            if not isinstance(raw, dict):
+                continue
+            step_type = raw.get('type')
+            if step_type not in {'action', 'learning'}:
+                continue
+            step = {
+                'title': str(raw.get('title') or '').strip()[:300],
+                'type': step_type,
+                'topic': str(raw.get('topic') or '').strip()[:300],
+                'question': str(raw.get('question') or '').strip()[:8000],
+                'reason': str(raw.get('reason') or '').strip()[:1000],
+                'status': 'pending',
+            }
+            if not step['title']:
+                continue
+            if step_type == 'learning' and (not step['topic'] or not step['question']):
+                continue
+            steps.append(step)
+        if not steps:
+            steps = [{'title': 'Уточнить следующий шаг', 'type': 'action',
+                      'topic': '', 'question': '', 'reason': 'План модели оказался пустым.',
+                      'status': 'pending'}]
+        summary = str(data.get('summary') or '').strip()[:2000]
+        with self.connect() as db:
+            cursor = db.execute(
+                'INSERT INTO brain_goals(title,description,plan_json,progress_json) VALUES (?,?,?,?)',
+                (title.strip(), description.strip(), json.dumps(steps, ensure_ascii=False),
+                 json.dumps({'summary': summary}, ensure_ascii=False))
+            )
+        return {'id': cursor.lastrowid, 'goals': self.brain_goals('active', 20)}
+
+    def goal_action(self, item):
+        goal_id = item.get('id')
+        action = item.get('action')
+        step_index = item.get('step')
+        if type(goal_id) is not int:
+            raise ValueError('Некорректная цель.')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM brain_goals WHERE id=?', (goal_id,)).fetchone()
+        if not row:
+            raise ValueError('Цель не найдена.')
+        row = dict(row)
+        try:
+            plan = json.loads(row['plan_json'] or '[]')
+        except (ValueError, TypeError):
+            plan = []
+        if action in {'done', 'archive'}:
+            new_status = 'done' if action == 'done' else 'archived'
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE brain_goals SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (new_status, goal_id)
+                )
+            return {'ok': True, 'status': new_status}
+        if type(step_index) is not int or not 0 <= step_index < len(plan):
+            raise ValueError('Шаг цели не найден.')
+        step = plan[step_index]
+        if action == 'complete_step':
+            step['status'] = 'done'
+        elif action == 'queue_learning':
+            if step.get('type') != 'learning':
+                raise ValueError('Этот шаг не является обучением.')
+            queued = self.learning_enqueue({'topic': step.get('topic', ''), 'question': step.get('question', '')})
+            step['status'] = 'queued'
+            step['queue_id'] = queued['id']
+        else:
+            raise ValueError('Неизвестное действие цели.')
+        with self.connect() as db:
+            db.execute(
+                "UPDATE brain_goals SET plan_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (json.dumps(plan, ensure_ascii=False), goal_id)
+            )
+        return {'ok': True, 'goals': self.brain_goals('active', 20)}
+
     def brain_suggestions(self, status='pending', limit=30):
         if status not in {'pending', 'accepted', 'rejected', 'all'}:
             raise ValueError('Неизвестный статус предложений.')
@@ -619,6 +762,7 @@ class Storage:
             'messages': self.ai_messages('chat', 100),
             'usage': self.usage_summary(),
             'suggestions': self.brain_suggestions('pending', 20),
+            'goals': self.brain_goals('active', 20),
         }
 
     def chat_send(self, item):
