@@ -1120,6 +1120,144 @@ class Storage:
             'goals': self.brain_goals('active', 20),
         }
 
+    @staticmethod
+    def _looks_like_dragon_command(text):
+        if not isinstance(text, str):
+            return False
+        clean = text.lower().strip()
+        if len(clean) < 4:
+            return False
+        patterns = (
+            r'\b(сделай|проверь|исправь|создай|обнови|запусти|прочитай|открой|'
+            r'посмотри|проанализируй|подготовь|сохрани|собери|найди|добавь|'
+            r'измени|удали|перепиши|проведи|выполни)\b',
+            r'\b(резервн\w*\s+копи\w*|провер\w*\s+проект|провер\w*\s+обновлен\w*)\b',
+        )
+        return any(re.search(pattern, clean, re.I) for pattern in patterns)
+
+    def dragon_capture_chat_task(self, user_text, assistant_text, source_message_id):
+        if not self._looks_like_dragon_command(user_text):
+            return None
+        prompt = (
+            'Определи, является ли сообщение пользователя реальным поручением Дракончику Тоору, '
+            'которое стоит связать с очередью действий. Верни только JSON: '
+            '{"is_task":true,"title":"...","action_type":"note|project_scan|file_read|file_write|'
+            'database_backup|update_check","payload":{},"requires_decision":true,'
+            '"plan":["шаг 1","шаг 2"]}. '
+            'is_task=false для вопроса, обсуждения, просьбы объяснить или идеи без поручения выполнить. '
+            'project_scan — проверить структуру/состояние проекта. database_backup — сделать резервную копию. '
+            'update_check — проверить обновления. file_read — прочитать конкретный файл. '
+            'file_write — только если пользователь прямо просит изменить конкретный файл; '
+            'для file_write всегда requires_decision=true. '
+            'Для широких задач вроде "проверь проект и исправь ошибки" используй project_scan, '
+            'requires_decision=true и план следующих шагов: сначала проверка, затем анализ, затем предлагаемые исправления. '
+            'Для точных безопасных задач backup/update_check requires_decision=false. '
+            'План максимум 6 коротких шагов. Ничего не выполняй сам.\n\n'
+            'Пользователь:\n' + user_text[:5000] + '\n\n'
+            'Ответ помощника для контекста:\n' + assistant_text[:5000]
+        )
+        try:
+            result = call_yandex_ai(self, prompt, max_output_tokens=650, purpose='planning')
+        except Exception as exc:
+            logging.warning('Dragon chat task detection failed: %s', exc)
+            return None
+        self.add_ai_message(
+            'brain', 'system', 'Связь чата с задачами Дракончика',
+            input_tokens=result['input_tokens'], output_tokens=result['output_tokens']
+        )
+        data = self._parse_json_object(result['text'])
+        if data.get('is_task') is not True:
+            return None
+        action_type = data.get('action_type')
+        allowed = {'note','project_scan','file_read','file_write','database_backup','update_check'}
+        if action_type not in allowed:
+            action_type = 'note'
+        payload = data.get('payload') if isinstance(data.get('payload'), dict) else {}
+        plan = data.get('plan') if isinstance(data.get('plan'), list) else []
+        requires_decision = data.get('requires_decision') is True
+        if action_type == 'file_write':
+            requires_decision = True
+        if action_type in {'note','project_scan'} and len(plan) > 1:
+            requires_decision = True
+        title = str(data.get('title') or user_text).strip()[:300]
+        if not title:
+            return None
+        return self.dragon_add_task({
+            'title': title,
+            'action_type': action_type,
+            'payload': payload,
+            'plan': plan,
+            'source_kind': 'chat',
+            'source_message_id': source_message_id,
+            'requires_decision': requires_decision,
+        })
+
+    def dragon_diary(self, days=14):
+        days = max(1, min(int(days), 31))
+        cutoff = time.strftime(
+            '%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - (days - 1) * 86400)
+        )
+        events = []
+        with self.connect() as db:
+            for row in db.execute(
+                'SELECT id,capability,target,summary,status,details_json,created_at '
+                'FROM dragon_actions WHERE created_at>=? ORDER BY created_at DESC LIMIT 250',
+                (cutoff,)
+            ).fetchall():
+                events.append({
+                    'kind': 'action',
+                    'title': row['summary'],
+                    'detail': row['target'],
+                    'status': row['status'],
+                    'created_at': row['created_at'],
+                })
+            for row in db.execute(
+                "SELECT id,topic,status,review_json,updated_at FROM learning_queue "
+                "WHERE status='done' AND updated_at>=? ORDER BY updated_at DESC LIMIT 100",
+                (cutoff,)
+            ).fetchall():
+                try:
+                    review = json.loads(row['review_json'] or '{}')
+                except (ValueError, TypeError):
+                    review = {}
+                events.append({
+                    'kind': 'learning',
+                    'title': 'Изучено: ' + row['topic'],
+                    'detail': str(review.get('summary') or '')[:500],
+                    'status': 'done',
+                    'created_at': row['updated_at'],
+                })
+            for row in db.execute(
+                'SELECT id,title,status,progress_json,updated_at FROM brain_goals '
+                'WHERE updated_at>=? ORDER BY updated_at DESC LIMIT 100',
+                (cutoff,)
+            ).fetchall():
+                try:
+                    progress = json.loads(row['progress_json'] or '{}')
+                except (ValueError, TypeError):
+                    progress = {}
+                events.append({
+                    'kind': 'goal',
+                    'title': 'Цель: ' + row['title'],
+                    'detail': str(progress.get('summary') or progress.get('auto_assessment') or '')[:500],
+                    'status': row['status'],
+                    'created_at': row['updated_at'],
+                })
+        events.sort(key=lambda item: item.get('created_at', ''), reverse=True)
+        grouped = []
+        by_day = {}
+        for event in events:
+            day = str(event.get('created_at') or '')[:10]
+            if not day:
+                continue
+            if day not in by_day:
+                group = {'day': day, 'events': []}
+                by_day[day] = group
+                grouped.append(group)
+            if len(by_day[day]['events']) < 30:
+                by_day[day]['events'].append(event)
+        return grouped[:days]
+
     def chat_send(self, item):
         text = item.get('text', '')
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 12000:
@@ -1128,7 +1266,7 @@ class Storage:
         analyze = item.get('analyze', True) is not False
         clean = text.strip()
         self.ensure_budget()
-        self.add_ai_message('chat', 'user', clean)
+        user_message_id = self.add_ai_message('chat', 'user', clean)
         history = self.ai_messages('chat', 14)
         transcript = []
         for message in history[:-1]:
@@ -1178,6 +1316,10 @@ class Storage:
         self.mark_ai_success()
         if analyze:
             self.brain_reflect(clean, result['text'], tori_message_id)
+        try:
+            self.dragon_capture_chat_task(clean, result['text'], user_message_id)
+        except Exception as exc:
+            logging.warning('Chat → Dragon task link failed: %s', exc)
         return self.chat_state()
 
     def learning_state(self):
@@ -2213,16 +2355,28 @@ class Storage:
                 row['details'] = {}
         tasks = self.dragon_tasks(50)
         running = next((task for task in tasks if task['status'] == 'running'), None)
+        notifications = self.dragon_notifications(False, 60)
+        category_counts = {'important':0,'completed':0,'error':0,'decision':0}
+        unread_category_counts = {'important':0,'completed':0,'error':0,'decision':0}
+        for note in notifications:
+            category = note.get('category') or 'important'
+            if category in category_counts:
+                category_counts[category] += 1
+                if not note.get('is_read'):
+                    unread_category_counts[category] += 1
         return {
             'name': name[0] if name else 'Дракончик Тоору',
             'permissions': self.dragon_permissions(),
             'mode': self.dragon_mode(),
             'unread_notifications': unread,
-            'notifications': self.dragon_notifications(False, 20),
+            'notification_counts': category_counts,
+            'unread_notification_counts': unread_category_counts,
+            'notifications': notifications,
             'actions': actions,
             'tasks': tasks,
             'skills': self.dragon_skills(),
             'activity': self.dragon_activity(14),
+            'diary': self.dragon_diary(14),
             'current': running,
         }
 
