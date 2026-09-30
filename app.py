@@ -296,6 +296,7 @@ class Storage:
             raise ValueError('Проверь имя модели AI Studio.')
         if not isinstance(api_key, str) or len(api_key) > 500:
             raise ValueError('Некорректный API-ключ.')
+        previous = self.ai_config(include_secret=True)
         with self.connect() as db:
             db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)', [
                 ('ai_folder_id', folder.strip()),
@@ -306,9 +307,16 @@ class Storage:
                 ('ai_monthly_budget_rub', str(monthly_budget)),
             ])
             if api_key.strip():
+                secret_changed = api_key.strip() != previous.get('api_key', '')
+                connection_changed = (
+                    folder.strip() != previous.get('folder_id')
+                    or model.strip() != previous.get('model')
+                    or auth_type != previous.get('auth_type')
+                )
                 db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
                            ('secret.yandex_api_key', api_key.strip()))
-                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
+                if secret_changed or connection_changed:
+                    db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
             if item.get('clear_key') is True:
                 db.execute("DELETE FROM settings WHERE key='secret.yandex_api_key'")
                 db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
