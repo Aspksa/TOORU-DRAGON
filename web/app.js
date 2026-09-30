@@ -109,6 +109,26 @@ function usageStrip(usage){
     ${limit>0?`<div class="usage-progress"><i style="width:${pct}%"></i></div>`:''}
   </div>`;
 }
+function brainSuggestionsMarkup(items){
+  const rows=items||[];
+  if(!rows.length)return '';
+  const names={memory:'Память',knowledge:'Знание',learning:'Доучиться'};
+  return `<section class="brain-panel">
+    <div class="section-head"><div><span class="eyebrow">Мозг Тори</span><h2>Предложения</h2></div><span class="status-label">${rows.length}</span></div>
+    <div class="brain-list">${rows.map(x=>{
+      const main=x.kind==='learning'?(x.topic||'Тема'):(x.title||'Предложение');
+      const body=x.kind==='learning'?(x.question||''):(x.body||'');
+      const confidence=Math.round((Number(x.confidence)||0)*100);
+      return `<article class="brain-card">
+        <div class="brain-card-head"><span class="brain-kind">${names[x.kind]||escapeHtml(x.kind)}</span><span class="meta">${confidence}%</span></div>
+        <h3>${escapeHtml(main)}</h3>
+        <p>${escapeHtml(body)}</p>
+        ${x.reason?`<small>${escapeHtml(x.reason)}</small>`:''}
+        <div class="brain-actions"><button class="primary" data-brain-action="accept" data-brain-id="${x.id}">Принять</button><button class="action" data-brain-action="reject" data-brain-id="${x.id}">Отклонить</button></div>
+      </article>`;
+    }).join('')}</div>
+  </section>`;
+}
 function chatPanel(){
   const c=state.chat||{configured:false,messages:[]};
   const blocked=!!c.usage?.blocked;
@@ -120,11 +140,12 @@ function chatPanel(){
       <textarea name="text" maxlength="12000" rows="2" placeholder="${blocked?'Месячный лимит AI достигнут':'Напиши Тори…'}" required ${c.configured&&!blocked?'':'disabled'}></textarea>
       <div class="composer-side">
         <label class="context-toggle"><input type="checkbox" name="use_context" value="1" checked> Память и знания</label>
+        <label class="context-toggle"><input type="checkbox" name="analyze" value="1" checked> Мозг: предложения</label>
         <button class="primary" ${c.configured&&!blocked?'':'disabled'}>Отправить</button>
       </div>
     </form>
     ${!c.configured?'<p class="hint">Сначала добавь API-ключ в разделе «Настройки».</p>':blocked?'<p class="hint warning">Месячный лимит достигнут. Измени бюджет в Настройках.</p>':''}
-  </section>`;
+  </section>${brainSuggestionsMarkup(c.suggestions)}`;
 }
 function learningQueueMarkup(q){
   const labels={pending:'В очереди',running:'Получает ответ',done:'Готово',stale:'Зависла',error:'Ошибка',cancelled:'Отменена',skipped:'Пропущена'};
@@ -215,6 +236,7 @@ content.addEventListener('click',async event=>{
     if(b.dataset.delete){if(!confirm('Удалить эту запись?'))return;await api('delete',{id:Number(b.dataset.delete)});await reload();render();message('Удалено.')}
     if(b.dataset.learningControl){await api('learning/control',{action:b.dataset.learningControl});await reload();render();message('Режим обучения обновлён.')}
     if(b.dataset.learningAction){await api('learning/action',{id:Number(b.dataset.learningId),action:b.dataset.learningAction});await reload();render();message('Задача обновлена.')}
+    if(b.dataset.brainAction){await api('brain/action',{id:Number(b.dataset.brainId),action:b.dataset.brainAction});await reload();render();message(b.dataset.brainAction==='accept'?'Предложение применено.':'Предложение отклонено.')}
     if(b.hasAttribute('data-ai-test')){const result=await api('ai/test',{});await reload();render();message('AI Studio отвечает: '+result.answer)}
     if(b.hasAttribute('data-backup')){const result=await api('backup',{});message('Копия создана: data/backups/'+result.filename)}
     if(b.hasAttribute('data-diagnose')){const d=await api('diagnostics');const pairs=[['База',d.database==='ok'?'OK':d.database],['Python',d.python],['SQLite',d.sqlite],['AI',d.ai],['Модель',d.qwen],['Доступ',d.access]];const el=document.getElementById('diagnostic-result');if(el)el.innerHTML='<dl>'+pairs.map(([a,v])=>`<dt>${escapeHtml(a)}</dt><dd>${escapeHtml(v)}</dd>`).join('')+'</dl>'}
@@ -229,7 +251,7 @@ content.addEventListener('submit',async event=>{
     if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
     if(f.id==='learning-queue-form')await api('learning/queue',values);
-    if(f.id==='chat-form'){await api('chat/send',{text:values.text,use_context:values.use_context==='1'});f.reset();const toggle=f.querySelector('[name="use_context"]');if(toggle)toggle.checked=true}
+    if(f.id==='chat-form'){await api('chat/send',{text:values.text,use_context:values.use_context==='1',analyze:values.analyze==='1'});f.reset();for(const name of ['use_context','analyze']){const toggle=f.querySelector('[name="'+name+'"]');if(toggle)toggle.checked=true}}
     await reload();render();
     message(f.id==='chat-form'?'Тори ответила.':'Сохранено.');
   }catch(error){message(error.message)}finally{if(b)b.disabled=false}
