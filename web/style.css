@@ -300,3 +300,7 @@ nav button:hover{transform:translateX(2px)}
 .brain-auto-counters{display:flex;gap:8px;flex-wrap:wrap}
 .brain-auto-counters span{padding:6px 9px;border:1px solid var(--line);border-radius:999px;background:var(--surface-elevated);color:var(--muted);font-size:10px}
 .brain-auto-counters strong{color:var(--text)}
+
+.experiment-auto,.experiment-manual{display:inline-block;margin-left:6px;padding:2px 6px;border-radius:999px;font-size:9px;font-weight:700}
+.experiment-auto{background:color-mix(in srgb,var(--success) 14%,transparent);color:var(--success)}
+.experiment-manual{background:var(--selected);color:var(--ink)}
