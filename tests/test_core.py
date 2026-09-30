@@ -459,8 +459,8 @@ class CoreTest(unittest.TestCase):
                 "VALUES ('learning','','SQLite','Что такое WAL?','Учебный пробел',0.85)"
             )
             db.execute(
-                "INSERT INTO brain_suggestions(kind,topic,question,reason,confidence) "
-                "VALUES ('learning','Python','Что такое GIL?','Ниже порога',0.70)"
+                "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                "VALUES ('learning','','Python','Что такое GIL?','Ниже порога',0.70)"
             )
         promoted = self.storage.promote_autonomous_learning()
         self.assertIsNotNone(promoted)
