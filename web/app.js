@@ -194,7 +194,7 @@ function chatPanel(){
       </div>
     </form>
     ${!c.configured?'<p class="hint">Сначала добавь API-ключ в разделе «Настройки».</p>':blocked?'<p class="hint warning">Месячный лимит достигнут. Измени бюджет в Настройках.</p>':''}
-  </section>${brainSuggestionsMarkup(c.suggestions)}${brainGoalsMarkup(c.goals)}`;
+  </section>`;
 }
 function reasoningItemsMarkup(r){
   const rows=r.items||[];
@@ -314,7 +314,7 @@ function brainCenterPanel(){
     <form id="learning-queue-form" class="clean-form"><input name="topic" maxlength="300" placeholder="Тема" required><textarea name="question" maxlength="8000" placeholder="Вопрос для Qwen" required></textarea><button class="action">Добавить вручную</button></form>
     <div id="queue-list">${learningQueueMarkup(q)}</div>
   </details>
-  ${brainSuggestionsMarkup(q.suggestions)}`;
+  <details class="panel"><summary><strong>Предложения Мозга</strong> · ${(q.suggestions||[]).length}</summary>${brainSuggestionsMarkup(q.suggestions)}</details>`;
 }
 function dataPanel(){
   return '<div class="learning-columns">'+
@@ -397,15 +397,19 @@ content.addEventListener('submit',async event=>{
 async function refreshLearningStatus(){
   if(page!=='ai'||tab!=='brain'||!state)return;
   try{
-    const q=await api('learning/status');state.learning=q;
-    const learning=document.getElementById('learning-status'),queueStatus=document.getElementById('queue-status'),memory=document.getElementById('memory-status'),queue=document.getElementById('queue-list'),stream=document.getElementById('learning-chat-stream'),usage=document.getElementById('learning-usage');
-    if(learning)learning.textContent={running:'Работает',paused:'Пауза',stopped:'Остановлено'}[q.mode]||q.mode;
+    const activeElement=document.activeElement;
+    const userEditing=activeElement&&['INPUT','TEXTAREA','SELECT'].includes(activeElement.tagName);
+    const q=await api('learning/status');
+    state.learning=q;
+    const queueStatus=document.getElementById('queue-status'),queue=document.getElementById('queue-list');
     if(queueStatus)queueStatus.textContent=(q.queue||[]).filter(x=>['pending','running'].includes(x.status)).length;
-    if(memory)memory.textContent=q.knowledge_count||0;
     if(queue)queue.innerHTML=learningQueueMarkup(q);
-    if(usage)usage.innerHTML=usageStrip(q.usage,'learning');
-    if(stream){const nearBottom=stream.scrollHeight-stream.scrollTop-stream.clientHeight<120;stream.innerHTML=learningConversation(q);if(nearBottom)scrollChat('learning-chat-stream')}
+    if(!userEditing){
+      const fresh=await api('state');
+      state=fresh;
+      render();
+    }
   }catch(_error){}
 }
-setInterval(refreshLearningStatus,2000);
+setInterval(refreshLearningStatus,3000);
 reload().then(render).catch(error=>{document.getElementById('connection').textContent='Нет связи';message(error.message+' Перезапусти StartTooruDragon.bat и обнови страницу.')});
