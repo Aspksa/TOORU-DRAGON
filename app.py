@@ -283,6 +283,24 @@ class Storage:
     def learning_state(self):
         cutoff = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - STALE_SECONDS))
         with self.connect() as db:
+            if not db.execute(
+                "SELECT 1 FROM ai_messages WHERE channel='learning' LIMIT 1"
+            ).fetchone():
+                for old in db.execute(
+                    'SELECT id,question,status,response_text,input_tokens,output_tokens,created_at,updated_at '
+                    'FROM learning_queue ORDER BY id'
+                ).fetchall():
+                    db.execute(
+                        'INSERT INTO ai_messages(channel,role,text,queue_id,created_at) VALUES (?,?,?,?,?)',
+                        ('learning', 'tori', old['question'], old['id'], old['created_at'])
+                    )
+                    if old['status'] == 'done' and old['response_text']:
+                        db.execute(
+                            'INSERT INTO ai_messages(channel,role,text,queue_id,input_tokens,output_tokens,created_at) '
+                            'VALUES (?,?,?,?,?,?,?)',
+                            ('learning', 'qwen', old['response_text'], old['id'],
+                             old['input_tokens'], old['output_tokens'], old['updated_at'])
+                        )
             db.execute(
                 "UPDATE learning_queue SET status='stale', "
                 "last_error='Ответ не завершён вовремя. Нажми «Повторить».', "
