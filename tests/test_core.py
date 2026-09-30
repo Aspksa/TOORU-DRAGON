@@ -656,6 +656,7 @@ class PortableTest(unittest.TestCase):
             original = base / 'Первый диск' / 'TOORU DRAGON'
             original.mkdir(parents=True)
             shutil.copy2(app.ROOT / 'app.py', original / 'app.py')
+            shutil.copy2(app.ROOT / 'updater.py', original / 'updater.py')
             shutil.copy2(app.ROOT / 'StartTooruDragon.bat', original / 'StartTooruDragon.bat')
             shutil.copytree(app.ROOT / 'web', original / 'web')
             # On Windows exercise the relocated embedded interpreter as well.
