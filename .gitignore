@@ -1,0 +1,9 @@
+python/
+data/
+.setup-*/
+__pycache__/
+*.pyc
+*.log
+*.zip
+.env
+.venv/
