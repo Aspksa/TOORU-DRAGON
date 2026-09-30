@@ -180,6 +180,12 @@ class Storage:
                 "SELECT id,role,substr(text,1,800) AS text,source_url,queue_id,created_at "
                 "FROM qwen_events ORDER BY id DESC LIMIT 50"
             )]
+            memory_count = db.execute(
+                "SELECT count(*) FROM records WHERE kind='memory'"
+            ).fetchone()[0]
+            knowledge_count = db.execute(
+                "SELECT count(*) FROM records WHERE kind='knowledge'"
+            ).fetchone()[0]
         try:
             last_seen = float(settings.get('qwen_last_seen', '0'))
         except ValueError:
@@ -192,6 +198,8 @@ class Storage:
             'last_seen': last_seen,
             'queue': queue,
             'events': events,
+            'memory_count': memory_count,
+            'knowledge_count': knowledge_count,
         }
 
     def qwen_control(self, action):
