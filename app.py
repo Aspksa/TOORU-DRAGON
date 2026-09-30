@@ -1080,9 +1080,14 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
             'Не утверждай, что помнишь данные, которых нет в переданной истории. '
             'Если информации недостаточно, скажи об этом прямо.'
         )
-    elif purpose == 'reflection':
+    elif purpose in {'reflection', 'planning', 'review'}:
+        labels = {
+            'reflection': 'внутренний аналитический модуль Тори',
+            'planning': 'планировщик целей Тори',
+            'review': 'модуль самопроверки знаний Тори',
+        }
         instructions = (
-            'Ты внутренний аналитический модуль Тори. '
+            'Ты ' + labels[purpose] + '. '
             'Не разговаривай с пользователем. Возвращай только валидный JSON без Markdown.'
         )
     else:
@@ -1300,6 +1305,10 @@ def make_server(storage, port=8765):
                     self.send(200, storage.chat_send(item))
                 elif self.path == '/api/brain/action':
                     self.send(200, storage.decide_brain_suggestion(item))
+                elif self.path == '/api/brain/goal':
+                    self.send(201, storage.create_goal(item))
+                elif self.path == '/api/brain/goal/action':
+                    self.send(200, storage.goal_action(item))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
                 else:
