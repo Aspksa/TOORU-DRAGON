@@ -617,6 +617,80 @@ class CoreTest(unittest.TestCase):
         state = self.request('/api/learning/status')
         self.assertEqual(state['queue'], [])
 
+    def test_goal_learning_completion_triggers_rethink_and_new_learning_step(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/learning/control', {'action': 'start'})
+        self.request('/api/brain/automation', {
+            'enabled': True, 'min_confidence': 0.75, 'daily_limit': 5, 'chain_limit': 3,
+        })
+        plan = [{
+            'title': 'Изучить метрики',
+            'type': 'learning',
+            'topic': 'Метрики',
+            'question': 'Как измерять качество?',
+            'reason': 'Нужно для решения.',
+            'status': 'pending',
+        }]
+        with self.storage.connect() as db:
+            cursor = db.execute(
+                "INSERT INTO brain_goals(title,description,plan_json,progress_json) VALUES (?,?,?,?)",
+                ('Улучшить разум', 'Автоматический цикл', json.dumps(plan, ensure_ascii=False), '{}')
+            )
+            goal_id = cursor.lastrowid
+        promoted = self.storage.promote_autonomous_learning()
+        queue_id = promoted['id']
+        with self.storage.connect() as db:
+            db.execute("UPDATE learning_queue SET status='running' WHERE id=?", (queue_id,))
+        completed = self.storage.complete_learning(
+            queue_id, 'Метрика должна сравнивать качество до и после.', 10, 8,
+            {'verdict':'good','confidence':0.9,'quality_score':0.9,'summary':'OK','gaps':[]}
+        )
+        self.assertEqual(completed['goal_id'], goal_id)
+        rethink = {
+            'summary': 'Нужно проверить устойчивость.',
+            'assessment': 'continue',
+            'new_steps': [{
+                'title': 'Изучить устойчивость',
+                'type': 'learning',
+                'topic': 'Оценка качества',
+                'question': 'Как проверять устойчивость метрики?',
+                'reason': 'Следующий пробел.',
+            }],
+        }
+        with patch('app.call_yandex_ai', return_value={
+            'text': json.dumps(rethink, ensure_ascii=False),
+            'input_tokens': 20, 'output_tokens': 15
+        }) as call:
+            result = self.storage.auto_rethink_goal(goal_id)
+        self.assertEqual(result['added_steps'], 1)
+        self.assertEqual(call.call_args.kwargs['purpose'], 'planning')
+        goal = self.storage.brain_goals('active', 20)[0]
+        self.assertEqual(goal['plan'][0]['status'], 'done')
+        self.assertEqual(goal['plan'][1]['status'], 'pending')
+        self.assertEqual(goal['plan'][1]['topic'], 'Оценка качества')
+        self.assertEqual(goal['progress']['auto_assessment'], 'continue')
+
+    def test_auto_development_toggle_starts_and_pauses_learning(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        state = self.request('/api/brain/automation', {
+            'enabled': True, 'min_confidence': 0.75, 'daily_limit': 5, 'chain_limit': 3,
+        })
+        self.assertTrue(state['automation']['enabled'])
+        self.assertEqual(state['mode'], 'running')
+        state = self.request('/api/brain/automation', {
+            'enabled': False, 'min_confidence': 0.75, 'daily_limit': 5, 'chain_limit': 3,
+        })
+        self.assertFalse(state['automation']['enabled'])
+        self.assertEqual(state['mode'], 'paused')
+
     def test_brain_automation_respects_daily_limit(self):
         self.request('/api/ai/config', {
             'folder_id': 'b1gpcfme4j9b9bv37hqb',
