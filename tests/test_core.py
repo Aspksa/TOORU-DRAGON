@@ -138,7 +138,8 @@ class PortableTest(unittest.TestCase):
                     if sys.platform == 'win32' and interpreter.exists():
                         # Invoke the actual BAT from an unrelated cwd, including Unicode/spaces.
                         batch = f'call "{folder / "StartTooruDragon.bat"}" --no-browser'
-                        result = subprocess.run(['cmd.exe', '/d', '/c', batch], cwd=base,
+                        # cmd.exe needs its own quoting, not list2cmdline's C-runtime escapes.
+                        result = subprocess.run('cmd.exe /d /c ' + batch, cwd=base,
                                                 capture_output=True, timeout=20)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertFalse((base / 'data').exists(), 'Данные созданы относительно cwd вместо проекта')
