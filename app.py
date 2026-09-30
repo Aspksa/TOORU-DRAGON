@@ -2007,15 +2007,23 @@ class Storage:
                     "UPDATE dragon_tasks SET status='pending',result_json='{}',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                     (task_id,)
                 )
+        if action in {'run','retry'}:
+            self.run_next_dragon_task(task_id)
         return self.dragon_status()
 
-    def run_next_dragon_task(self):
-        if self.dragon_mode() != 'execute':
+    def run_next_dragon_task(self, force_id=None):
+        if force_id is None and self.dragon_mode() != 'execute':
             return None
         with self.connect() as db:
-            row = db.execute(
-                "SELECT * FROM dragon_tasks WHERE status='pending' ORDER BY id LIMIT 1"
-            ).fetchone()
+            if force_id is None:
+                row = db.execute(
+                    "SELECT * FROM dragon_tasks WHERE status='pending' ORDER BY id LIMIT 1"
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT * FROM dragon_tasks WHERE id=? AND status='pending'",
+                    (force_id,)
+                ).fetchone()
             if not row:
                 return None
             db.execute(
