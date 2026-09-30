@@ -86,7 +86,7 @@ class CoreTest(unittest.TestCase):
                 self.assertEqual(error.exception.code, 403)
             launch.assert_not_called()
             result = self.request('/api/qwen/open', {})
-            self.assertIn('Qwen открыт', result['message'])
+            self.assertIn('Браузер Тори открыт', result['message'])
             args = launch.call_args.args[0]
             profile = Path(self.temp.name).resolve() / 'browser-profile' / 'chrome'
             self.assertTrue(profile.is_dir())
