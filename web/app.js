@@ -2,7 +2,7 @@
 const token=document.querySelector('meta[name="tooru-token"]').content;
 const content=document.getElementById('content');
 let state,page='main',tab='chat';
-const labels={main:'Главная',profile:'Личный кабинет',ai:'Tooru/Ai',work:'Рабочие проекты',home:'Домашние проекты',mobile:'Мобильное приложение',settings:'Настройки',updates:'Система обновления',diagnostics:'Система диагностики'};
+const labels={main:'Главная',profile:'Личный кабинет',dragon:'Дракончик Тоору',ai:'Tooru/Ai',work:'Рабочие проекты',home:'Домашние проекты',mobile:'Мобильное приложение',settings:'Настройки',updates:'Система обновления',diagnostics:'Система диагностики'};
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtDate=value=>{try{return new Date(value).toLocaleString('ru-RU')}catch(_e){return ''}};
 function message(text){document.getElementById('message').textContent=text||''}
@@ -322,24 +322,55 @@ function dataPanel(){
     '<div>'+libraryPanel('knowledge','Знания','Материалы Тори и результаты обучения.','Название','Содержание')+'</div>'+
   '</div>';
 }
-function dragonSettings(){
-  const d=state.dragon||{name:'Дракончик Тоору',permissions:{},actions:[]};
+function dragonPermissionsForm(){
+  const d=state.dragon||{permissions:{}};
   const p=d.permissions||{};
-  const toggle=(name,label,checked)=>'<label class="context-toggle"><input type="checkbox" name="'+name+'" value="1" '+(checked?'checked':'')+'> '+label+'</label>';
-  return '<section class="panel clean-form"><span class="eyebrow">Дракончик Тоору</span><h2>Права помощника</h2><p>Доступ к рабочему проекту и действиям TOORU. Все изменения проекта записываются в журнал.</p>'+
-    '<form id="dragon-permissions-form">'+
-      toggle('project_read','Читать весь рабочий проект',p.project_read)+
-      toggle('project_write','Изменять файлы проекта с резервной копией',p.project_write)+
-      toggle('data_manage','Работать с данными TOORU',p.data_manage)+
-      toggle('brain_auto','Автоматически развивать Мозг',p.brain_auto)+
-      toggle('update_check','Проверять обновления',p.update_check)+
-      toggle('notifications','Показывать всплывающие сообщения',p.notifications)+
-      toggle('delete_files','Удалять файлы проекта',p.delete_files)+
-      '<button class="primary" type="submit">Сохранить права</button>'+
-    '</form>'+
-    '<details><summary><strong>Журнал действий</strong></summary><div class="dragon-action-list">'+
-      (d.actions||[]).map(a=>'<div class="queue-item"><div><strong>'+escapeHtml(a.summary)+'</strong><small>'+escapeHtml(a.target||'')+'</small></div><span class="meta">'+escapeHtml(fmtDate(a.created_at))+'</span></div>').join('')+
-    '</div></details></section>';
+  const toggle=(name,label,checked)=>'<label class="context-toggle dragon-permission"><input type="checkbox" name="'+name+'" value="1" '+(checked?'checked':'')+'> <span>'+label+'</span></label>';
+  return '<form id="dragon-permissions-form" class="dragon-permissions">'+
+    toggle('project_read','Читать рабочий проект',p.project_read)+
+    toggle('project_write','Изменять файлы с резервной копией',p.project_write)+
+    toggle('data_manage','Работать с данными TOORU',p.data_manage)+
+    toggle('brain_auto','Автоматически развивать Мозг',p.brain_auto)+
+    toggle('update_check','Проверять обновления',p.update_check)+
+    toggle('notifications','Показывать всплывающие сообщения',p.notifications)+
+    toggle('delete_files','Удалять файлы проекта',p.delete_files)+
+    '<button class="primary" type="submit">Сохранить права</button>'+
+  '</form>';
+}
+function dragonNotificationsMarkup(d){
+  const notes=d.notifications||[];
+  if(!notes.length)return '<div class="empty-state">Уведомлений пока нет.</div>';
+  return notes.slice(0,12).map(n=>'<article class="dragon-note '+(n.is_read?'is-read':'')+'"><span class="dragon-note-dot '+escapeHtml(n.level||'info')+'"></span><div><strong>'+escapeHtml(n.title)+'</strong><p>'+escapeHtml(n.body||'')+'</p><small>'+escapeHtml(fmtDate(n.created_at))+'</small></div></article>').join('');
+}
+function dragonActionsMarkup(d){
+  const rows=d.actions||[];
+  if(!rows.length)return '<div class="empty-state">Действий пока нет.</div>';
+  return rows.slice(0,12).map(a=>'<article class="dragon-action"><span class="dragon-action-icon">◆</span><div><strong>'+escapeHtml(a.summary)+'</strong><p>'+escapeHtml(a.target||'')+'</p><small>'+escapeHtml(fmtDate(a.created_at))+'</small></div></article>').join('');
+}
+function dragonPanel(){
+  const d=state.dragon||{name:'Дракончик Тоору',permissions:{},actions:[],notifications:[],unread_notifications:0};
+  const q=state.learning||{};
+  const enabled=Object.values(d.permissions||{}).filter(Boolean).length;
+  const total=Object.keys(d.permissions||{}).length;
+  const auto=q.automation?.enabled;
+  return '<section class="dragon-hero">'+
+    '<div class="dragon-emblem" aria-hidden="true">🐉</div>'+
+    '<div class="dragon-hero-copy"><span class="eyebrow">Помощник</span><h2>'+escapeHtml(d.name||'Дракончик Тоору')+'</h2><p>Центр управления помощником, её правами, действиями и связью с проектом.</p>'+
+      '<div class="dragon-badges"><span class="status-label ok">'+enabled+' / '+total+' прав</span><span class="status-label '+(auto?'ok':'')+'">Авторазвитие: '+(auto?'включено':'выключено')+'</span><span class="status-label">'+(d.unread_notifications||0)+' новых</span></div>'+
+    '</div>'+
+  '</section>'+
+  '<div class="dragon-quick-grid">'+
+    '<button class="dragon-quick primary-card" data-go="ai" data-open-tab="brain"><span>✦</span><strong>Открыть Мозг</strong><small>Разум, цели и обучение</small></button>'+
+    '<button class="dragon-quick" data-dragon-scan><span>⌁</span><strong>Проверить проект</strong><small>Посчитать доступные файлы</small></button>'+
+    '<button class="dragon-quick" data-backup><span>▣</span><strong>Резервная копия</strong><small>Скопировать базу TOORU</small></button>'+
+    '<button class="dragon-quick" data-update-check><span>↓</span><strong>Проверить обновление</strong><small>Сравнить с GitHub main</small></button>'+
+  '</div>'+
+  '<div class="dragon-center-grid">'+
+    '<section class="panel"><div class="section-head"><div><span class="eyebrow">Доступ</span><h2>Права</h2></div><span class="dragon-shield">◆</span></div>'+dragonPermissionsForm()+'</section>'+
+    '<section class="panel"><div class="section-head"><div><span class="eyebrow">События</span><h2>Уведомления</h2></div><button class="mini-action" data-dragon-read-all>Прочитано</button></div><div id="dragon-notifications">'+dragonNotificationsMarkup(d)+'</div></section>'+
+  '</div>'+
+  '<section class="panel"><div class="section-head"><div><span class="eyebrow">История</span><h2>Последние действия</h2></div><span class="meta">Все изменения проекта журналируются</span></div><div id="dragon-actions">'+dragonActionsMarkup(d)+'</div></section>'+
+  '<section class="panel dragon-project-state"><div class="section-head"><div><span class="eyebrow">Проект</span><h2>Доступ Дракончика</h2></div></div><div id="dragon-project-result" class="hint">Нажми «Проверить проект», чтобы увидеть доступный объём.</div></section>';
 }
 function ensureDragonToastHost(){
   let host=document.getElementById('dragon-toast-host');
@@ -382,7 +413,8 @@ function render(){
   document.getElementById('description').textContent='';
   if(page==='main')content.innerHTML=mainPanel();
   else if(page==='profile'){content.innerHTML=profilePanel()}
-  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+dragonSettings()+'</div>';content.querySelector('#theme').value=state.settings.theme;const auth=content.querySelector('#ai-auth');if(auth)auth.value=state.learning?.auth_type||'api_key'}
+  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+'</div>';content.querySelector('#theme').value=state.settings.theme;const auth=content.querySelector('#ai-auth');if(auth)auth.value=state.learning?.auth_type||'api_key'}
+  else if(page==='dragon')content.innerHTML=dragonPanel()
   else if(page==='work')content.innerHTML=projectPanel('work','Рабочие проекты');
   else if(page==='home')content.innerHTML=projectPanel('home','Домашние проекты');
   else if(page==='ai'){
@@ -413,6 +445,8 @@ content.addEventListener('click',async event=>{
     if(b.dataset.learningAction){await api('learning/action',{id:Number(b.dataset.learningId),action:b.dataset.learningAction});await reload();render();message('Задача обновлена.')}
     if(b.dataset.brainAction){await api('brain/action',{id:Number(b.dataset.brainId),action:b.dataset.brainAction});await reload();render();message(b.dataset.brainAction==='accept'?'Предложение применено.':'Предложение отклонено.')}
     if(b.dataset.goalAction){await api('brain/goal/action',{id:Number(b.dataset.goalId),action:b.dataset.goalAction,step:b.dataset.step===undefined?null:Number(b.dataset.step)});await reload();render();message('Цель обновлена.')}
+    if(b.hasAttribute('data-dragon-scan')){const result=await api('dragon/project');const el=document.getElementById('dragon-project-result');const bytes=(result.files||[]).reduce((sum,x)=>sum+Number(x.size||0),0);if(el)el.innerHTML='<strong>'+String((result.files||[]).length)+'</strong> доступных файлов · '+escapeHtml(formatBytes(bytes));message('Проект проверен.')}
+    if(b.hasAttribute('data-dragon-read-all')){await api('dragon/notifications/read',{ids:null});await reload();render();message('Уведомления отмечены прочитанными.')}
     if(b.hasAttribute('data-ai-test')){const result=await api('ai/test',{});await reload();render();message('AI Studio отвечает: '+result.answer)}
     if(b.hasAttribute('data-update-check')){const u=await api('update/status');const el=document.getElementById('update-result');if(el)el.innerHTML=updateStatusMarkup(u)}
     if(b.hasAttribute('data-update-start')){if(!confirm('Обновить TOORU из GitHub и перезапустить программу?'))return;const u=await api('update/start',{});if(u.already_current){message('Уже установлена последняя ревизия GitHub.')}else{const el=document.getElementById('update-result');if(el)el.textContent='Обновление запущено. TOORU сейчас перезапустится.';message('Создана копия базы: data/backups/'+u.database_backup)}}
@@ -443,7 +477,7 @@ content.addEventListener('submit',async event=>{
     if(f.id==='reasoning-form')await api('brain/reason',{problem:values.problem,use_context:values.use_context==='1'});
     if(f.id==='chat-form'){await api('chat/send',{text:values.text,use_context:values.use_context==='1',analyze:values.analyze==='1'});f.reset();for(const name of ['use_context','analyze']){const toggle=f.querySelector('[name="'+name+'"]');if(toggle)toggle.checked=true}}
     await reload();render();
-    message(f.id==='chat-form'?'Тори ответила.':f.id==='reasoning-form'?'Логический разбор готов.':'Сохранено.');
+    message(f.id==='chat-form'?'Дракончик Тоору ответила.':f.id==='reasoning-form'?'Логический разбор готов.':f.id==='dragon-permissions-form'?'Права Дракончика Тоору сохранены.':'Сохранено.');
   }catch(error){message(error.message)}finally{if(b)b.disabled=false}
 });
 async function refreshLearningStatus(){
