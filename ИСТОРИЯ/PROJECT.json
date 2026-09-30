@@ -314,7 +314,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "Добавлены интеграционные тесты моста: очередь, handoff, bridge token, дедупликация и сохранение ответа в знания; Manifest V3 проверяется. Живой DOM chat.qwen.ai и автоматическая загрузка расширения в пользовательском браузере ещё не проверены.",
+    "current_change_tests": "Windows CI на коммите 4501835093d5cf6247eccc871e97f3b4fc90d2d0: 9 интеграционных тестов успешно, включая очередь Qwen, handoff, bridge token, дедупликацию, сохранение ответа в знания и Manifest V3. Живой DOM chat.qwen.ai и фактическая загрузка расширения в пользовательском Edge/Chrome ещё не проверены.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
@@ -326,6 +326,12 @@
       "result": "confirmed_by_user",
       "details": "Пользователь ответил «Да работает» на вопрос о запуске StartTooruDragon.bat и автоматическом открытии интерфейса в браузере.",
       "installed_commit": "unknown"
+    },
+    "qwen_bridge": {
+      "commit": "4501835093d5cf6247eccc871e97f3b4fc90d2d0",
+      "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36656198475",
+      "result": "success",
+      "live_qwen_dom_tested": false
     }
   },
   "next_steps": [
