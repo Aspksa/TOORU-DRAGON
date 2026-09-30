@@ -6,6 +6,13 @@ const labels={main:'Главная',profile:'Личный кабинет',ai:'To
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtDate=value=>{try{return new Date(value).toLocaleString('ru-RU')}catch(_e){return ''}};
 function message(text){document.getElementById('message').textContent=text||''}
+function formatBytes(value){
+  const bytes=Number(value)||0;
+  if(!bytes)return '—';
+  if(bytes<1024)return bytes+' Б';
+  if(bytes<1048576)return (bytes/1024).toFixed(1)+' КБ';
+  return (bytes/1048576).toFixed(2)+' МБ';
+}
 function updateStatusMarkup(u){
   const stateText=!u.tracked?'Локальная сборка ещё не синхронизирована':u.update_available?'Есть обновление':'Установлена последняя ревизия';
   const installed=u.installed_revision?u.installed_revision.slice(0,12):'—';
@@ -14,7 +21,9 @@ function updateStatusMarkup(u){
   if(!u.files_available)files='<p class="hint">Список файлов появится после первой синхронизации локальной сборки.</p>';
   else if(!(u.files||[]).length)files='<p class="hint">Изменённых файлов нет.</p>';
   else files='<div class="update-files"><h3>Файлы обновления</h3><ul>'+u.files.map(file=>'<li><strong>'+escapeHtml(file.status_label||file.status)+'</strong> · <code>'+escapeHtml(file.path)+'</code>'+(file.will_update?'':' <span class="meta">не заменяется обновлятором</span>')+'</li>').join('')+'</ul></div>';
-  return '<dl><dt>Версия</dt><dd>'+escapeHtml(u.version)+'</dd><dt>Установленная ревизия</dt><dd>'+escapeHtml(installed)+'</dd><dt>Ревизия на GitHub</dt><dd>'+escapeHtml(u.latest_revision.slice(0,12))+'</dd><dt>Состояние</dt><dd>'+escapeHtml(stateText)+'</dd><dt>Название обновления</dt><dd>'+escapeHtml(u.latest_message||'—')+'</dd><dt>Описание</dt><dd>'+escapeHtml(description)+'</dd></dl>'+files;
+  const last='<dl><dt>Версия</dt><dd>'+escapeHtml(u.version)+'</dd><dt>Установленная ревизия</dt><dd>'+escapeHtml(installed)+'</dd><dt>Ревизия на GitHub</dt><dd>'+escapeHtml(u.latest_revision.slice(0,12))+'</dd><dt>Состояние</dt><dd>'+escapeHtml(stateText)+'</dd><dt>Установлено</dt><dd>'+escapeHtml(u.installed_at?fmtDate(u.installed_at):'—')+'</dd><dt>Скачано в последний раз</dt><dd>'+escapeHtml(formatBytes(u.last_download_bytes))+'</dd><dt>Последняя системная копия</dt><dd>'+escapeHtml(u.last_backup||'—')+'</dd><dt>Название обновления</dt><dd>'+escapeHtml(u.latest_message||'—')+'</dd><dt>Описание</dt><dd>'+escapeHtml(description)+'</dd></dl>';
+  const history=(u.history||[]).length?'<div class="update-files"><h3>История обновлений</h3><ul>'+u.history.map(item=>'<li><strong>'+escapeHtml((item.revision||'').slice(0,12))+'</strong> · '+escapeHtml(item.installed_at?fmtDate(item.installed_at):'')+' · '+escapeHtml(formatBytes(item.download_bytes))+'<br><span>'+escapeHtml(item.title||'Без названия')+'</span></li>').join('')+'</ul></div>':'<p class="hint">История появится после следующего обновления.</p>';
+  return last+files+history;
 }
 async function api(path,data){
   const response=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:{'X-Tooru-Token':token,'Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});

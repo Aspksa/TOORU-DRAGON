@@ -98,13 +98,40 @@ class UpdaterTest(unittest.TestCase):
         self.assertEqual(revision['message'], 'Improve updater UI')
         self.assertEqual(revision['description'], 'Show description and changed files.')
 
+    def test_update_history_is_limited_to_last_twenty_entries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / updater.HISTORY_REL
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps([
+                {'revision': f'{index:040x}', 'installed_at': str(index)}
+                for index in range(25)
+            ]), 'utf-8')
+            history = updater.update_history(root)
+            self.assertEqual(len(history), 20)
+            self.assertEqual(history[0]['installed_at'], '5')
+            self.assertEqual(history[-1]['installed_at'], '24')
+
     def test_local_status_uses_commit_sha_not_only_version(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'VERSION').write_text('0.0.0', 'utf-8')
             (root / updater.STATE_REL).parent.mkdir(parents=True)
             (root / updater.STATE_REL).write_text(
-                json.dumps({'revision': 'oldsha'}), 'utf-8'
+                json.dumps({
+                    'revision': 'oldsha',
+                    'updated_at': '2026-09-30T10:00:00+10:00',
+                    'backup': 'backups/system-before-test',
+                    'download_bytes': 1048576,
+                }), 'utf-8'
+            )
+            (root / updater.HISTORY_REL).write_text(
+                json.dumps([{
+                    'revision': 'oldsha',
+                    'installed_at': '2026-09-30T10:00:00+10:00',
+                    'title': 'Previous update',
+                    'download_bytes': 1048576,
+                }]), 'utf-8'
             )
             with patch('updater.latest_revision', return_value={
                 'sha': 'b' * 40, 'message': 'Fresh commit', 'description': 'Details'
@@ -124,6 +151,10 @@ class UpdaterTest(unittest.TestCase):
             self.assertEqual(status['latest_revision'], 'b' * 40)
             self.assertEqual(status['latest_description'], 'Details')
             self.assertEqual(status['files'][0]['path'], 'web/app.js')
+            self.assertEqual(status['installed_at'], '2026-09-30T10:00:00+10:00')
+            self.assertEqual(status['last_backup'], 'backups/system-before-test')
+            self.assertEqual(status['last_download_bytes'], 1048576)
+            self.assertEqual(status['history'][0]['title'], 'Previous update')
 
 
 if __name__ == '__main__':
