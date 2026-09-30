@@ -112,7 +112,7 @@ function chatMessages(c){
   const rows=c?.messages||[];
   if(!rows.length)return '<div class="chat-empty"><strong>Тори готова к диалогу</strong><span>Напиши первое сообщение.</span></div>';
   return rows.map(x=>{
-    const role=x.role==='user'?'Ты':x.role==='tori'?'Тори':'Система';
+    const role=x.role==='user'?'Ты':x.role==='tori'?'Дракончик Тоору':'Система';
     const side=x.role==='user'?'user':x.role==='tori'?'assistant':'system';
     const usage=(x.input_tokens||x.output_tokens)?`<span>${x.input_tokens||0} + ${x.output_tokens||0} ток.</span>`:'';
     const context=(x.context||[]).length?`<div class="context-used"><span>Использовано:</span>${x.context.map(item=>`<span class="context-chip">${item.kind==='memory'?'Память':'Знание'} · ${escapeHtml(item.title)}</span>`).join('')}</div>`:'';
@@ -182,7 +182,7 @@ function chatPanel(){
   const c=state.chat||{configured:false,messages:[]};
   const blocked=!!c.usage?.blocked;
   return `<section class="conversation-shell">
-    <div class="conversation-head"><div><span class="eyebrow">Личный помощник</span><h2>Чат с Тори</h2></div><span class="status-label ${c.last_success>0?'ok':''}">${!c.configured?'Настрой AI Studio':c.last_success>0?'Онлайн':'Готова'}</span></div>
+    <div class="conversation-head"><div><span class="eyebrow">Дракончик Тоору</span><h2>Чат</h2></div><span class="status-label ${c.last_success>0?'ok':''}">${!c.configured?'Настрой AI Studio':c.last_success>0?'Онлайн':'Готова'}</span></div>
     ${usageStrip(c.usage,'all')}
     <div class="chat-stream" id="chat-stream">${chatMessages(c)}</div>
     <form id="chat-form" class="chat-composer">
@@ -322,6 +322,49 @@ function dataPanel(){
     '<div>'+libraryPanel('knowledge','Знания','Материалы Тори и результаты обучения.','Название','Содержание')+'</div>'+
   '</div>';
 }
+function dragonSettings(){
+  const d=state.dragon||{name:'Дракончик Тоору',permissions:{},actions:[]};
+  const p=d.permissions||{};
+  const toggle=(name,label,checked)=>'<label class="context-toggle"><input type="checkbox" name="'+name+'" value="1" '+(checked?'checked':'')+'> '+label+'</label>';
+  return '<section class="panel clean-form"><span class="eyebrow">Дракончик Тоору</span><h2>Права помощника</h2><p>Доступ к рабочему проекту и действиям TOORU. Все изменения проекта записываются в журнал.</p>'+
+    '<form id="dragon-permissions-form">'+
+      toggle('project_read','Читать весь рабочий проект',p.project_read)+
+      toggle('project_write','Изменять файлы проекта с резервной копией',p.project_write)+
+      toggle('data_manage','Работать с данными TOORU',p.data_manage)+
+      toggle('brain_auto','Автоматически развивать Мозг',p.brain_auto)+
+      toggle('update_check','Проверять обновления',p.update_check)+
+      toggle('notifications','Показывать всплывающие сообщения',p.notifications)+
+      toggle('delete_files','Удалять файлы проекта',p.delete_files)+
+      '<button class="primary" type="submit">Сохранить права</button>'+
+    '</form>'+
+    '<details><summary><strong>Журнал действий</strong></summary><div class="dragon-action-list">'+
+      (d.actions||[]).map(a=>'<div class="queue-item"><div><strong>'+escapeHtml(a.summary)+'</strong><small>'+escapeHtml(a.target||'')+'</small></div><span class="meta">'+escapeHtml(fmtDate(a.created_at))+'</span></div>').join('')+
+    '</div></details></section>';
+}
+function ensureDragonToastHost(){
+  let host=document.getElementById('dragon-toast-host');
+  if(!host){host=document.createElement('div');host.id='dragon-toast-host';host.className='dragon-toast-host';document.body.appendChild(host)}
+  return host;
+}
+function showDragonToast(note){
+  const host=ensureDragonToastHost();
+  if(host.querySelector('[data-dragon-note="'+note.id+'"]'))return;
+  const el=document.createElement('div');
+  el.className='dragon-toast level-'+escapeHtml(note.level||'info');
+  el.dataset.dragonNote=String(note.id);
+  el.innerHTML='<div><strong>'+escapeHtml(note.title)+'</strong>'+(note.body?'<p>'+escapeHtml(note.body)+'</p>':'')+'</div><button aria-label="Закрыть">×</button>';
+  el.querySelector('button').addEventListener('click',async()=>{try{await api('dragon/notifications/read',{ids:[note.id]})}catch(_e){}el.remove()});
+  host.appendChild(el);
+  setTimeout(()=>{if(el.isConnected)el.remove()},12000);
+}
+async function refreshDragonNotifications(){
+  if(!state)return;
+  try{
+    const d=await api('dragon/status');
+    state.dragon=d;
+    (d.notifications||[]).filter(n=>!n.is_read).slice(0,3).forEach(showDragonToast);
+  }catch(_error){}
+}
 function mainPanel(){
   const learning=state.learning||{};
   return `<section class="welcome"><span class="eyebrow">TOORU · DRAGON</span><h2>Добро пожаловать, ${escapeHtml(state.settings.name)}</h2><p>Один центр для общения, памяти, проектов и обучения Тори.</p></section>
@@ -339,7 +382,7 @@ function render(){
   document.getElementById('description').textContent='';
   if(page==='main')content.innerHTML=mainPanel();
   else if(page==='profile'){content.innerHTML=profilePanel()}
-  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+'</div>';content.querySelector('#theme').value=state.settings.theme;const auth=content.querySelector('#ai-auth');if(auth)auth.value=state.learning?.auth_type||'api_key'}
+  else if(page==='settings'){content.innerHTML='<div class="settings-grid">'+appearanceSettings()+aiSettings()+dragonSettings()+'</div>';content.querySelector('#theme').value=state.settings.theme;const auth=content.querySelector('#ai-auth');if(auth)auth.value=state.learning?.auth_type||'api_key'}
   else if(page==='work')content.innerHTML=projectPanel('work','Рабочие проекты');
   else if(page==='home')content.innerHTML=projectPanel('home','Домашние проекты');
   else if(page==='ai'){
@@ -385,6 +428,15 @@ content.addEventListener('submit',async event=>{
     if(f.id==='profile-form')await api('settings',{name:values.name,theme:state.settings.theme});
     if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
+    if(f.id==='dragon-permissions-form')await api('dragon/permissions',{
+      project_read:values.project_read==='1',
+      project_write:values.project_write==='1',
+      data_manage:values.data_manage==='1',
+      brain_auto:values.brain_auto==='1',
+      update_check:values.update_check==='1',
+      notifications:values.notifications==='1',
+      delete_files:values.delete_files==='1'
+    });
     if(f.id==='learning-queue-form')await api('learning/queue',values);
     if(f.id==='brain-automation-form')await api('brain/automation',{enabled:values.enabled==='1',min_confidence:Number(values.min_confidence),daily_limit:Number(values.daily_limit),chain_limit:Number(values.chain_limit)});
     if(f.id==='goal-form')await api('brain/goal',values);
@@ -412,4 +464,5 @@ async function refreshLearningStatus(){
   }catch(_error){}
 }
 setInterval(refreshLearningStatus,3000);
-reload().then(render).catch(error=>{document.getElementById('connection').textContent='Нет связи';message(error.message+' Перезапусти StartTooruDragon.bat и обнови страницу.')});
+setInterval(refreshDragonNotifications,4000);
+reload().then(()=>{render();refreshDragonNotifications()}).catch(error=>{document.getElementById('connection').textContent='Нет связи';message(error.message+' Перезапусти StartTooruDragon.bat и обнови страницу.')});
