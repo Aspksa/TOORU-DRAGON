@@ -352,12 +352,27 @@ class Storage:
 
 
 def extract_response_text(data):
-    if isinstance(data.get('output_text'), str) and data['output_text'].strip():
-        return data['output_text'].strip()
+    if not isinstance(data, dict):
+        return ''
+    output_text = data.get('output_text')
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
     parts = []
-    for item in data.get('output', []) if isinstance(data.get('output'), list) else []:
-        for content in item.get('content', []) if isinstance(item, dict) else []:
+    output = data.get('output')
+    if not isinstance(output, list):
+        return ''
+
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content_items = item.get('content')
+        if not isinstance(content_items, list):
+            continue
+        for content in content_items:
             if not isinstance(content, dict):
+                continue
+            if content.get('type') not in (None, 'output_text'):
                 continue
             value = content.get('text')
             if isinstance(value, str) and value.strip():

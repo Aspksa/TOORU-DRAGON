@@ -306,7 +306,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "Windows CI run 36660347475: portable Python tests, project history validation and node --check web/app.js all passed for Yandex AI Studio migration.",
+    "current_change_tests": "Исправление null-content в Yandex AI Studio Responses API добавлено; финальный Windows CI ожидается.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
@@ -342,7 +342,7 @@
   "next_steps": [
     {
       "priority": 1,
-      "task": "Проверить реальный API-ключ пользователя через кнопку «Проверить связь» и один живой цикл вопрос → ответ → Знания."
+      "task": "После обновления на пользовательском Windows нажать «Повторить» для задач «роутер» и «русский язык» и проверить сохранение ответов в Знания."
     },
     {
       "priority": 2,

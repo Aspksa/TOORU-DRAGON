@@ -151,6 +151,23 @@ class CoreTest(unittest.TestCase):
         call.assert_called_once()
         self.assertGreater(self.request('/api/learning/status')['last_success'], 0)
 
+    def test_extract_response_text_handles_null_content(self):
+        response = {
+            'output_text': None,
+            'output': [
+                None,
+                {'type': 'reasoning', 'content': None},
+                {'type': 'message', 'content': [
+                    None,
+                    {'type': 'reasoning_text', 'text': 'служебное'},
+                    {'type': 'output_text', 'text': 'Ответ модели'},
+                ]},
+            ],
+        }
+        self.assertEqual(app.extract_response_text(response), 'Ответ модели')
+        self.assertEqual(app.extract_response_text({'output': None}), '')
+        self.assertEqual(app.extract_response_text(None), '')
+
     def test_learning_ui_uses_ai_studio_and_queue_actions(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
         self.assertIn('Yandex AI Studio', ui)
