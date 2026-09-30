@@ -77,99 +77,89 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 404)
         self.assertEqual(self.storage.state()['records']['memory'], [])
 
-    def test_qwen_profile_launch_and_security(self):
-        executable = Path(self.temp.name) / 'Browser with spaces.exe'
-        with patch('app.find_browser', return_value=executable), patch('app.subprocess.Popen') as launch:
-            for headers in ({}, {'X-Tooru-Token': self.token, 'Origin': 'https://example.com'}):
-                with self.assertRaises(urllib.error.HTTPError) as error:
-                    self.request('/api/qwen/open', {}, headers)
-                self.assertEqual(error.exception.code, 403)
-            launch.assert_not_called()
-            result = self.request('/api/qwen/open', {})
-            self.assertIn('Браузер Тори открыт', result['message'])
-            args = launch.call_args.args[0]
-            profile = Path(self.temp.name).resolve() / 'browser-profile' / 'chrome'
-            self.assertTrue(profile.is_dir())
-            self.assertEqual(args[0], str(executable))
-            self.assertEqual(args[1], '--user-data-dir=' + str(profile))
-            self.assertTrue(args[2].startswith('--load-extension='))
-            self.assertEqual(args[3], '--new-window')
-            self.assertTrue(args[4].startswith('https://chat.qwen.ai/#'))
-            self.assertFalse(launch.call_args.kwargs.get('shell', False))
-            self.assertEqual(self.request('/api/state')['qwen']['mode'], 'observe')
-            self.assertFalse(self.request('/api/state')['qwen_connected'])
-            launch.side_effect = OSError('failure')
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self.request('/api/qwen/open', {})
-            self.assertEqual(error.exception.code, 400)
-        with patch('app.find_browser', side_effect=ValueError('Браузер не найден')):
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self.request('/api/qwen/open', {})
-            self.assertEqual(error.exception.code, 400)
-
-    def test_browser_discovery_and_invalid_selection(self):
-        with patch('app.sys.platform', 'win32'), patch.dict('app.os.environ',
-                {'LOCALAPPDATA': self.temp.name}, clear=True):
-            for invalid in ('firefox', '../chrome', 'edge', [], None):
-                with self.assertRaises(ValueError):
-                    app.find_browser(invalid)
-            with self.assertRaises(ValueError):
-                app.find_browser('chrome')
-            executable = Path(self.temp.name) / 'Google/Chrome/Application/chrome.exe'
-            executable.parent.mkdir(parents=True)
-            executable.touch()
-            self.assertEqual(app.find_browser('chrome'), executable)
-
-
-    def test_qwen_bridge_queue_handoff_and_knowledge(self):
-        self.request('/api/qwen/control', {'action': 'start'})
-        self.request('/api/qwen/control', {'action': 'handoff'})
-        queued = self.request('/api/qwen/queue', {'topic': 'Python', 'question': 'Что такое WAL?'})
-        bridge_headers = {
-            'X-Tooru-Bridge': self.storage.bridge_token(),
-            'Origin': 'chrome-extension://tooru-test',
-        }
-        poll = self.request('/api/qwen/bridge', {'action': 'poll'}, bridge_headers)
-        self.assertEqual(poll['owner'], 'tori')
-        self.assertEqual(poll['item']['id'], queued['id'])
-        self.request('/api/qwen/bridge', {'action': 'claim', 'queue_id': queued['id']}, bridge_headers)
-        event = {
-            'action': 'event', 'role': 'assistant', 'text': 'WAL — журнал предзаписи.',
-            'source_url': 'https://chat.qwen.ai/c/test', 'queue_id': queued['id'],
-        }
-        first = self.request('/api/qwen/bridge', event, bridge_headers)
-        second = self.request('/api/qwen/bridge', event, bridge_headers)
-        self.assertTrue(first['inserted'])
-        self.assertFalse(second['inserted'])
+    def test_ai_config_is_secret_and_learning_queue_controls(self):
         state = self.request('/api/state')
-        self.assertTrue(state['qwen_connected'])
-        status = self.request('/api/qwen/status')
-        self.assertTrue(status['connected'])
-        self.assertEqual(status['memory_count'], 0)
-        self.assertEqual(status['knowledge_count'], 1)
-        self.assertEqual(state['qwen']['queue'][0]['status'], 'done')
-        self.assertEqual(state['records']['knowledge'][0]['source'], 'Qwen · https://chat.qwen.ai/c/test')
-        self.assertIn('WAL', state['records']['knowledge'][0]['body'])
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request('/api/qwen/bridge', {'action': 'heartbeat'},
-                         {'X-Tooru-Bridge': 'wrong', 'Origin': 'chrome-extension://tooru-test'})
-        self.assertEqual(error.exception.code, 403)
+        self.assertEqual(state['learning']['folder_id'], app.DEFAULT_YANDEX_FOLDER)
+        self.assertEqual(state['learning']['model'], app.DEFAULT_YANDEX_MODEL)
+        self.assertFalse(state['learning']['configured'])
 
-    def test_qwen_extension_files_are_valid(self):
-        extension = app.ROOT / 'browser' / 'qwen-bridge'
-        manifest = json.loads((extension / 'manifest.json').read_text('utf-8'))
-        self.assertEqual(manifest['manifest_version'], 3)
-        self.assertIn('https://chat.qwen.ai/*', manifest['content_scripts'][0]['matches'])
-        self.assertTrue((extension / 'background.js').is_file())
-        self.assertTrue((extension / 'content.js').is_file())
+        configured = self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.assertTrue(configured['configured'])
+        self.assertNotIn('api_key', configured)
+        public_state = self.request('/api/state')
+        self.assertNotIn('secret.yandex_api_key', public_state['settings'])
+        self.assertNotIn('secret-test-key-value', json.dumps(public_state, ensure_ascii=False))
 
-    def test_learning_ui_uses_tori_browser_language(self):
+        first = self.request('/api/learning/queue', {'topic': 'Python', 'question': 'Что такое WAL?'})
+        second = self.request('/api/learning/queue', {'topic': 'SQLite', 'question': 'Что такое FTS5?'})
+        queue = self.request('/api/learning/status')['queue']
+        self.assertEqual({row['id'] for row in queue}, {first['id'], second['id']})
+
+        self.request('/api/learning/action', {'id': first['id'], 'action': 'skip'})
+        skipped = next(x for x in self.request('/api/learning/status')['queue'] if x['id'] == first['id'])
+        self.assertEqual(skipped['status'], 'skipped')
+        self.request('/api/learning/action', {'id': first['id'], 'action': 'retry'})
+        retried = next(x for x in self.request('/api/learning/status')['queue'] if x['id'] == first['id'])
+        self.assertEqual(retried['status'], 'pending')
+        self.request('/api/learning/action', {'id': second['id'], 'action': 'cancel'})
+        cancelled = next(x for x in self.request('/api/learning/status')['queue'] if x['id'] == second['id'])
+        self.assertEqual(cancelled['status'], 'cancelled')
+
+    def test_learning_claim_complete_and_stale_detection(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        queued = self.request('/api/learning/queue', {'topic': 'Python', 'question': 'Что такое WAL?'})
+        self.request('/api/learning/control', {'action': 'start'})
+        claimed = self.storage.claim_learning()
+        self.assertEqual(claimed['id'], queued['id'])
+        self.assertTrue(self.storage.complete_learning(queued['id'], 'WAL — журнал предзаписи.', 100, 40))
+        state = self.request('/api/state')
+        task = next(x for x in state['learning']['queue'] if x['id'] == queued['id'])
+        self.assertEqual(task['status'], 'done')
+        self.assertEqual(task['input_tokens'], 100)
+        self.assertEqual(task['output_tokens'], 40)
+        self.assertEqual(state['records']['knowledge'][0]['source'],
+                         'Yandex AI Studio · qwen3.6-35b-a3b/latest')
+
+        stale = self.request('/api/learning/queue', {'topic': 'Сбой', 'question': 'Зависни'})
+        with self.storage.connect() as db:
+            db.execute(
+                "UPDATE learning_queue SET status='running',updated_at='2000-01-01T00:00:00Z' WHERE id=?",
+                (stale['id'],)
+            )
+        stale_task = next(x for x in self.request('/api/learning/status')['queue'] if x['id'] == stale['id'])
+        self.assertEqual(stale_task['status'], 'stale')
+        self.assertIn('Повторить', stale_task['last_error'])
+
+    def test_ai_test_endpoint_uses_model_without_exposing_key(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        with patch('app.call_yandex_ai', return_value={'text': 'OK', 'input_tokens': 2, 'output_tokens': 1}) as call:
+            result = self.request('/api/ai/test', {})
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['answer'], 'OK')
+        call.assert_called_once()
+        self.assertGreater(self.request('/api/learning/status')['last_success'], 0)
+
+    def test_learning_ui_uses_ai_studio_and_queue_actions(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
-        self.assertIn('Открыть Браузер Тори', ui)
-        self.assertIn('Текущая сессия', ui)
-        self.assertIn('Журнал обучения', ui)
-        self.assertNotIn('Открыть Chrome Тори', ui)
-        self.assertNotIn('data/browser-profile/chrome', ui)
+        self.assertIn('Yandex AI Studio', ui)
+        self.assertIn('Qwen3.6 35B', ui)
+        self.assertIn('Повторить', ui)
+        self.assertIn('Пропустить', ui)
+        self.assertIn('Отменить', ui)
+        self.assertNotIn('Открыть Браузер Тори', ui)
+        self.assertNotIn('qwen/bridge', ui)
 
     def test_duplicate_launcher_and_lock(self):
         lock = app.InstanceLock(Path(self.temp.name) / 'instance.lock')
@@ -193,7 +183,6 @@ class PortableTest(unittest.TestCase):
             shutil.copy2(app.ROOT / 'app.py', original / 'app.py')
             shutil.copy2(app.ROOT / 'StartTooruDragon.bat', original / 'StartTooruDragon.bat')
             shutil.copytree(app.ROOT / 'web', original / 'web')
-            shutil.copytree(app.ROOT / 'browser', original / 'browser')
             # On Windows exercise the relocated embedded interpreter as well.
             if sys.platform == 'win32' and (app.ROOT / 'python' / 'python.exe').exists():
                 shutil.copytree(app.ROOT / 'python', original / 'python')
