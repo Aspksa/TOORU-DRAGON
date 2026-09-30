@@ -9,69 +9,22 @@ import logging
 import os
 from pathlib import Path
 import secrets
-import socket
 import sqlite3
-import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
-from urllib.parse import urlencode
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent
 VERSION = '0.0.0'
 KINDS = {'work', 'home', 'memory', 'knowledge', 'topic', 'chat'}
-
-
-def find_browser(browser):
-    """Use installed Windows browsers; never fall back to a personal profile."""
-    if sys.platform != 'win32':
-        raise ValueError('Браузер Тори поддерживается на Windows 10/11.')
-    locations = {
-        'chrome': ('Google/Chrome/Application/chrome.exe', 'Google Chrome'),
-    }
-    if browser != 'chrome':
-        raise ValueError('Браузер Тори использует отдельный профиль на базе Google Chrome.')
-    relative, name = locations[browser]
-    for key in ('PROGRAMFILES(X86)', 'PROGRAMFILES', 'LOCALAPPDATA'):
-        root = os.environ.get(key)
-        if root:
-            candidate = Path(root) / relative
-            if candidate.is_file():
-                return candidate
-    raise ValueError(f'{name} не найден. Для Браузера Тори требуется установленный Google Chrome.')
-
-
-def open_qwen(directory, browser, port, bridge_token):
-    executable = find_browser(browser)
-    profile = Path(directory).resolve() / 'browser-profile' / browser
-    profile.mkdir(parents=True, exist_ok=True)
-    extension = ROOT / 'browser' / 'qwen-bridge'
-    if not extension.is_dir():
-        raise ValueError('Мост Qwen отсутствует. Обновите файлы TOORU · DRAGON.')
-    fragment = urlencode({'tooru_port': int(port), 'tooru_bridge': bridge_token})
-    qwen_url = 'https://chat.qwen.ai/#' + fragment
-    command = [
-        str(executable),
-        '--user-data-dir=' + str(profile),
-        '--load-extension=' + str(extension),
-        '--new-window',
-        qwen_url,
-    ]
-    try:
-        subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
-    except OSError as exc:
-        raise ValueError('Не удалось запустить браузер Тори. Проверьте установку браузера.') from exc
-    note = (
-        'Браузер Тори открыт. Наблюдение включено автоматически. '
-        'Когда мост установит связь с Qwen, статус в разделе «Обучение» обновится сам. '
-        'Если мост не подключается, откройте настройки расширений Браузера Тори и '
-        'загрузите папку browser\\qwen-bridge как распакованное расширение.'
-    )
-    return {'message': note, 'extension_path': str(extension)}
+YANDEX_AI_URL = 'https://ai.api.cloud.yandex.net/v1/responses'
+DEFAULT_YANDEX_FOLDER = 'b1gpcfme4j9b9bv37hqb'
+DEFAULT_YANDEX_MODEL = 'qwen3.6-35b-a3b/latest'
+STALE_SECONDS = 600
 
 
 class Storage:
@@ -79,11 +32,11 @@ class Storage:
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / 'tooru.sqlite3'
-        for name in ('documents', 'models', 'browser-profile', 'logs', 'backups'):
+        for name in ('documents', 'models', 'logs', 'backups'):
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 2:
+            if version > 3:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -95,35 +48,51 @@ class Storage:
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 CREATE INDEX IF NOT EXISTS records_kind_id ON records(kind, id DESC);
-                CREATE TABLE IF NOT EXISTS qwen_queue (
+                CREATE TABLE IF NOT EXISTS learning_queue (
                     id INTEGER PRIMARY KEY,
                     topic TEXT NOT NULL,
                     question TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    response_text TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
-                CREATE INDEX IF NOT EXISTS qwen_queue_status_id ON qwen_queue(status, id);
-                CREATE TABLE IF NOT EXISTS qwen_events (
-                    id INTEGER PRIMARY KEY,
-                    role TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    source_url TEXT NOT NULL,
-                    digest TEXT NOT NULL UNIQUE,
-                    queue_id INTEGER,
-                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-                );
-                CREATE INDEX IF NOT EXISTS qwen_events_id ON qwen_events(id DESC);
-                PRAGMA user_version=2;
+                CREATE INDEX IF NOT EXISTS learning_queue_status_id ON learning_queue(status, id);
             ''')
+            if version < 3:
+                old_queue = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='qwen_queue'"
+                ).fetchone()
+                if old_queue:
+                    for row in db.execute(
+                        'SELECT id,topic,question,status,created_at,updated_at FROM qwen_queue ORDER BY id'
+                    ).fetchall():
+                        mapped = {'pending': 'pending', 'sent': 'stale', 'done': 'done'}.get(
+                            row['status'], 'stale'
+                        )
+                        db.execute(
+                            'INSERT OR IGNORE INTO learning_queue'
+                            '(id,topic,question,status,created_at,updated_at) VALUES (?,?,?,?,?,?)',
+                            (row['id'], row['topic'], row['question'], mapped,
+                             row['created_at'], row['updated_at'])
+                        )
+                db.execute('DROP TABLE IF EXISTS qwen_events')
+                db.execute('DROP TABLE IF EXISTS qwen_queue')
+                db.execute("DELETE FROM settings WHERE key IN "
+                           "('qwen_mode','qwen_owner','qwen_last_seen','secret.qwen_bridge')")
+                db.execute('PRAGMA user_version=3')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
-            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('qwen_mode', 'stopped'))
-            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('qwen_owner', 'user'))
-            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('qwen_last_seen', '0'))
-            if not db.execute("SELECT 1 FROM settings WHERE key='secret.qwen_bridge'").fetchone():
-                db.execute('INSERT INTO settings VALUES (?,?)',
-                           ('secret.qwen_bridge', secrets.token_urlsafe(32)))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
+                       ('ai_folder_id', DEFAULT_YANDEX_FOLDER))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
+                       ('ai_model', DEFAULT_YANDEX_MODEL))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('learning_mode', 'stopped'))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
 
     @contextmanager
     def connect(self):
@@ -144,9 +113,9 @@ class Storage:
             records = {kind: [dict(row) for row in db.execute(
                 'SELECT * FROM records WHERE kind=? ORDER BY id DESC LIMIT 200', (kind,)
             )] for kind in sorted(KINDS)}
-        qwen = self.qwen_state()
+        learning = self.learning_state()
         return dict(version=VERSION, settings=settings, counts=counts, records=records,
-                    ai_connected=False, qwen_connected=qwen['connected'], qwen=qwen)
+                    ai_connected=learning['configured'], learning=learning)
 
     def add(self, item):
         kind, title = item.get('kind'), item.get('title', '')
@@ -160,25 +129,70 @@ class Storage:
                                 (kind, title.strip(), body.strip()))
             return cursor.lastrowid
 
-
-    def bridge_token(self):
+    def ai_config(self, include_secret=False):
         with self.connect() as db:
-            row = db.execute("SELECT value FROM settings WHERE key='secret.qwen_bridge'").fetchone()
-        if not row:
-            raise RuntimeError('Не найден локальный ключ моста Qwen.')
-        return row[0]
+            rows = dict(db.execute(
+                "SELECT key,value FROM settings WHERE key IN "
+                "('ai_folder_id','ai_model','ai_last_success','secret.yandex_api_key')"
+            ).fetchall())
+        result = {
+            'folder_id': rows.get('ai_folder_id', DEFAULT_YANDEX_FOLDER),
+            'model': rows.get('ai_model', DEFAULT_YANDEX_MODEL),
+            'configured': bool(rows.get('secret.yandex_api_key')),
+            'last_success': float(rows.get('ai_last_success', '0') or 0),
+        }
+        if include_secret:
+            result['api_key'] = rows.get('secret.yandex_api_key', '')
+        return result
 
-    def qwen_state(self):
+    def save_ai_config(self, item):
+        folder = item.get('folder_id', '')
+        model = item.get('model', '')
+        api_key = item.get('api_key', '')
+        if not isinstance(folder, str) or not 10 <= len(folder.strip()) <= 64 or not folder.strip().isalnum():
+            raise ValueError('Проверь идентификатор каталога Yandex Cloud.')
+        allowed = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._@/-')
+        if not isinstance(model, str) or not 3 <= len(model.strip()) <= 120 or any(c not in allowed for c in model.strip()):
+            raise ValueError('Проверь имя модели AI Studio.')
+        if not isinstance(api_key, str) or len(api_key) > 500:
+            raise ValueError('Некорректный API-ключ.')
         with self.connect() as db:
+            db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)', [
+                ('ai_folder_id', folder.strip()),
+                ('ai_model', model.strip()),
+            ])
+            if api_key.strip():
+                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                           ('secret.yandex_api_key', api_key.strip()))
+                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
+            if item.get('clear_key') is True:
+                db.execute("DELETE FROM settings WHERE key='secret.yandex_api_key'")
+                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('ai_last_success', '0'))
+        return self.learning_state()
+
+    def mark_ai_success(self):
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                       ('ai_last_success', str(time.time())))
+
+    def learning_state(self):
+        cutoff = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - STALE_SECONDS))
+        with self.connect() as db:
+            db.execute(
+                "UPDATE learning_queue SET status='stale', "
+                "last_error='Ответ не завершён вовремя. Можно повторить задачу.', "
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "WHERE status='running' AND updated_at<?",
+                (cutoff,)
+            )
             settings = dict(db.execute(
-                "SELECT key, value FROM settings WHERE key IN ('qwen_mode','qwen_owner','qwen_last_seen')"
+                "SELECT key,value FROM settings WHERE key IN "
+                "('learning_mode','ai_folder_id','ai_model','ai_last_success','secret.yandex_api_key')"
             ).fetchall())
             queue = [dict(row) for row in db.execute(
-                "SELECT id,topic,question,status,created_at,updated_at FROM qwen_queue ORDER BY id DESC LIMIT 50"
-            )]
-            events = [dict(row) for row in db.execute(
-                "SELECT id,role,substr(text,1,800) AS text,source_url,queue_id,created_at "
-                "FROM qwen_events ORDER BY id DESC LIMIT 50"
+                'SELECT id,topic,question,status,attempts,substr(response_text,1,1200) AS response_text,'
+                'last_error,input_tokens,output_tokens,created_at,updated_at '
+                'FROM learning_queue ORDER BY id DESC LIMIT 100'
             )]
             memory_count = db.execute(
                 "SELECT count(*) FROM records WHERE kind='memory'"
@@ -186,41 +200,28 @@ class Storage:
             knowledge_count = db.execute(
                 "SELECT count(*) FROM records WHERE kind='knowledge'"
             ).fetchone()[0]
-        try:
-            last_seen = float(settings.get('qwen_last_seen', '0'))
-        except ValueError:
-            last_seen = 0
-        connected = last_seen > 0 and time.time() - last_seen < 20
         return {
-            'mode': settings.get('qwen_mode', 'stopped'),
-            'owner': settings.get('qwen_owner', 'user'),
-            'connected': connected,
-            'last_seen': last_seen,
+            'mode': settings.get('learning_mode', 'stopped'),
+            'configured': bool(settings.get('secret.yandex_api_key')),
+            'folder_id': settings.get('ai_folder_id', DEFAULT_YANDEX_FOLDER),
+            'model': settings.get('ai_model', DEFAULT_YANDEX_MODEL),
+            'last_success': float(settings.get('ai_last_success', '0') or 0),
             'queue': queue,
-            'events': events,
             'memory_count': memory_count,
             'knowledge_count': knowledge_count,
+            'stale_seconds': STALE_SECONDS,
         }
 
-    def qwen_control(self, action):
-        if action not in {'start', 'pause', 'stop', 'handoff', 'takeover'}:
-            raise ValueError('Неизвестная команда управления Qwen.')
-        values = {}
-        if action == 'start':
-            values['qwen_mode'] = 'observe'
-        elif action == 'pause':
-            values['qwen_mode'] = 'paused'
-        elif action == 'stop':
-            values.update(qwen_mode='stopped', qwen_owner='user')
-        elif action == 'handoff':
-            values.update(qwen_mode='observe', qwen_owner='tori')
-        elif action == 'takeover':
-            values['qwen_owner'] = 'user'
+    def learning_control(self, action):
+        modes = {'start': 'running', 'pause': 'paused', 'stop': 'stopped'}
+        if action not in modes:
+            raise ValueError('Неизвестная команда управления обучением.')
         with self.connect() as db:
-            db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)', values.items())
-        return self.qwen_state()
+            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                       ('learning_mode', modes[action]))
+        return self.learning_state()
 
-    def qwen_enqueue(self, item):
+    def learning_enqueue(self, item):
         topic = item.get('topic', '')
         question = item.get('question', '')
         if not isinstance(topic, str) or not 1 <= len(topic.strip()) <= 300:
@@ -229,82 +230,108 @@ class Storage:
             raise ValueError('Вопрос должен содержать от 1 до 8 000 символов.')
         with self.connect() as db:
             cursor = db.execute(
-                'INSERT INTO qwen_queue(topic,question) VALUES (?,?)',
+                'INSERT INTO learning_queue(topic,question) VALUES (?,?)',
                 (topic.strip(), question.strip())
             )
         return {'id': cursor.lastrowid}
 
-    def qwen_bridge(self, item):
+    def learning_action(self, item):
+        queue_id = item.get('id')
         action = item.get('action')
+        if type(queue_id) is not int:
+            raise ValueError('Некорректный номер задачи.')
         with self.connect() as db:
-            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
-                       ('qwen_last_seen', str(time.time())))
-            if action == 'poll':
-                values = dict(db.execute(
-                    "SELECT key,value FROM settings WHERE key IN ('qwen_mode','qwen_owner')"
-                ).fetchall())
-                row = None
-                if values.get('qwen_mode') == 'observe' and values.get('qwen_owner') == 'tori':
-                    row = db.execute(
-                        "SELECT id,topic,question FROM qwen_queue WHERE status='pending' ORDER BY id LIMIT 1"
-                    ).fetchone()
-                return {
-                    'mode': values.get('qwen_mode', 'stopped'),
-                    'owner': values.get('qwen_owner', 'user'),
-                    'item': dict(row) if row else None,
-                }
-            if action == 'claim':
-                queue_id = item.get('queue_id')
-                if type(queue_id) is not int:
-                    raise ValueError('Некорректный номер вопроса.')
+            row = db.execute('SELECT status FROM learning_queue WHERE id=?', (queue_id,)).fetchone()
+            if not row:
+                raise ValueError('Задача обучения не найдена.')
+            status = row['status']
+            if action == 'cancel':
+                if status == 'done':
+                    raise ValueError('Готовое знание уже сохранено.')
                 db.execute(
-                    "UPDATE qwen_queue SET status='sent', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
-                    "WHERE id=? AND status='pending'",
+                    "UPDATE learning_queue SET status='cancelled',last_error='',"
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                     (queue_id,)
                 )
-                return {'ok': True}
-            if action == 'event':
-                role = item.get('role')
-                text = item.get('text', '')
-                source_url = item.get('source_url', '')
-                queue_id = item.get('queue_id')
-                if role not in {'user', 'assistant'}:
-                    raise ValueError('Неизвестный автор сообщения Qwen.')
-                if not isinstance(text, str) or not 1 <= len(text.strip()) <= 50000:
-                    raise ValueError('Некорректный текст сообщения Qwen.')
-                if not isinstance(source_url, str) or not source_url.startswith('https://chat.qwen.ai'):
-                    raise ValueError('Недопустимый источник Qwen.')
-                if queue_id is not None and type(queue_id) is not int:
-                    raise ValueError('Некорректная связь с очередью.')
-                clean = text.strip()
-                digest = hashlib.sha256(
-                    (role + '\0' + clean + '\0' + source_url).encode('utf-8')
-                ).hexdigest()
-                cursor = db.execute(
-                    'INSERT OR IGNORE INTO qwen_events(role,text,source_url,digest,queue_id) VALUES (?,?,?,?,?)',
-                    (role, clean, source_url, digest, queue_id)
+            elif action == 'skip':
+                if status == 'done':
+                    raise ValueError('Готовое знание уже сохранено.')
+                db.execute(
+                    "UPDATE learning_queue SET status='skipped',last_error='',"
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (queue_id,)
                 )
-                inserted = cursor.rowcount == 1
-                if inserted and role == 'assistant' and queue_id is not None:
-                    queued = db.execute(
-                        'SELECT topic,question FROM qwen_queue WHERE id=?', (queue_id,)
-                    ).fetchone()
-                    if queued:
-                        db.execute(
-                            "UPDATE qwen_queue SET status='done', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
-                            "WHERE id=?",
-                            (queue_id,)
-                        )
-                        body = clean[:20000]
-                        db.execute(
-                            'INSERT INTO records(kind,title,body,source) VALUES (?,?,?,?)',
-                            ('knowledge', 'Qwen · ' + queued['topic'], body,
-                             'Qwen · ' + source_url)
-                        )
-                return {'ok': True, 'inserted': inserted}
-            if action == 'heartbeat':
-                return {'ok': True}
-        raise ValueError('Неизвестное действие моста Qwen.')
+            elif action == 'retry':
+                if status not in {'error', 'stale', 'cancelled', 'skipped'}:
+                    raise ValueError('Повтор доступен только для остановленной или ошибочной задачи.')
+                db.execute(
+                    "UPDATE learning_queue SET status='pending',response_text='',last_error='',"
+                    "input_tokens=0,output_tokens=0,"
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (queue_id,)
+                )
+            else:
+                raise ValueError('Неизвестное действие с задачей.')
+        return self.learning_state()
+
+    def claim_learning(self):
+        with self.connect() as db:
+            mode = db.execute(
+                "SELECT value FROM settings WHERE key='learning_mode'"
+            ).fetchone()
+            key = db.execute(
+                "SELECT value FROM settings WHERE key='secret.yandex_api_key'"
+            ).fetchone()
+            if not mode or mode[0] != 'running' or not key:
+                return None
+            row = db.execute(
+                "SELECT id,topic,question FROM learning_queue "
+                "WHERE status='pending' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            changed = db.execute(
+                "UPDATE learning_queue SET status='running',attempts=attempts+1,"
+                "last_error='',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "WHERE id=? AND status='pending'",
+                (row['id'],)
+            ).rowcount
+            return dict(row) if changed else None
+
+    def complete_learning(self, queue_id, text, input_tokens=0, output_tokens=0):
+        clean = text.strip()
+        if not clean:
+            raise ValueError('AI Studio вернула пустой ответ.')
+        with self.connect() as db:
+            row = db.execute(
+                'SELECT topic,status FROM learning_queue WHERE id=?', (queue_id,)
+            ).fetchone()
+            if not row or row['status'] != 'running':
+                return False
+            model = db.execute("SELECT value FROM settings WHERE key='ai_model'").fetchone()[0]
+            db.execute(
+                "UPDATE learning_queue SET status='done',response_text=?,last_error='',"
+                "input_tokens=?,output_tokens=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "WHERE id=?",
+                (clean[:50000], int(input_tokens or 0), int(output_tokens or 0), queue_id)
+            )
+            db.execute(
+                'INSERT INTO records(kind,title,body,source) VALUES (?,?,?,?)',
+                ('knowledge', 'Qwen · ' + row['topic'], clean[:20000],
+                 'Yandex AI Studio · ' + model)
+            )
+        self.mark_ai_success()
+        return True
+
+    def fail_learning(self, queue_id, error):
+        message = str(error).strip()[:1000] or 'Неизвестная ошибка AI Studio.'
+        with self.connect() as db:
+            db.execute(
+                "UPDATE learning_queue SET status='error',last_error=?,"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "WHERE id=? AND status='running'",
+                (message, queue_id)
+            )
 
     def backup(self):
         destination = self.directory / 'backups' / (time.strftime('tooru-%Y%m%d-%H%M%S-') + secrets.token_hex(3) + '.sqlite3')
@@ -319,9 +346,101 @@ class Storage:
                     python=sys.version.split()[0], version=VERSION,
                     database_bytes=self.path.stat().st_size,
                     data_directory=str(self.directory),
-                    ai='Не подключён',
-                    qwen='Подключён' if self.qwen_state()['connected'] else 'Не подключён',
+                    ai='Настроен' if self.ai_config()['configured'] else 'Не настроен',
+                    qwen='Yandex AI Studio · Qwen3.6 35B',
                     access='Только этот компьютер')
+
+
+def extract_response_text(data):
+    if isinstance(data.get('output_text'), str) and data['output_text'].strip():
+        return data['output_text'].strip()
+    parts = []
+    for item in data.get('output', []) if isinstance(data.get('output'), list) else []:
+        for content in item.get('content', []) if isinstance(item, dict) else []:
+            if not isinstance(content, dict):
+                continue
+            value = content.get('text')
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+    return '\n\n'.join(parts).strip()
+
+
+def call_yandex_ai(storage, question, topic='', max_output_tokens=1500):
+    config = storage.ai_config(include_secret=True)
+    if not config.get('api_key'):
+        raise ValueError('Сначала добавь API-ключ Yandex AI Studio.')
+    instructions = (
+        'Ты источник знаний для личного помощника Тори. Отвечай по-русски, точно и структурированно. '
+        'Не выдумывай факты. Если в вопросе не хватает данных, явно укажи это. '
+        'Дай итог, который можно сохранить в базу знаний. '
+        + (('Тема: ' + topic + '.') if topic else '')
+    )
+    payload = json.dumps({
+        'model': f"gpt://{config['folder_id']}/{config['model']}",
+        'temperature': 0.3,
+        'instructions': instructions,
+        'input': question,
+        'max_output_tokens': max(16, min(int(max_output_tokens), 8000)),
+    }, ensure_ascii=False).encode('utf-8')
+    request = urllib.request.Request(
+        YANDEX_AI_URL,
+        data=payload,
+        headers={
+            'Authorization': 'Api-Key ' + config['api_key'],
+            'Content-Type': 'application/json',
+            'User-Agent': 'TOORU-DRAGON/' + VERSION,
+        },
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            data = json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = ''
+        try:
+            parsed = json.loads(exc.read().decode('utf-8', errors='replace'))
+            detail = parsed.get('error', {}).get('message', '') if isinstance(parsed.get('error'), dict) else ''
+        except Exception:
+            pass
+        raise ValueError(
+            f'AI Studio вернула HTTP {exc.code}' + ((': ' + detail[:300]) if detail else '.')
+        ) from None
+    except urllib.error.URLError as exc:
+        raise ValueError('Нет связи с Yandex AI Studio. Проверь интернет.') from exc
+    text = extract_response_text(data)
+    if not text:
+        raise ValueError('AI Studio вернула ответ без текста.')
+    usage = data.get('usage') if isinstance(data.get('usage'), dict) else {}
+    return {
+        'text': text,
+        'input_tokens': int(usage.get('input_tokens', 0) or 0),
+        'output_tokens': int(usage.get('output_tokens', 0) or 0),
+    }
+
+
+class LearningWorker(threading.Thread):
+    def __init__(self, storage):
+        super().__init__(name='tooru-learning', daemon=True)
+        self.storage = storage
+        self.stopping = threading.Event()
+
+    def run(self):
+        while not self.stopping.wait(1.5):
+            item = self.storage.claim_learning()
+            if not item:
+                continue
+            try:
+                result = call_yandex_ai(self.storage, item['question'], item['topic'])
+                self.storage.complete_learning(
+                    item['id'], result['text'],
+                    result['input_tokens'], result['output_tokens']
+                )
+            except Exception as exc:
+                logging.warning('Learning task %s failed: %s', item['id'], exc)
+                self.storage.fail_learning(item['id'], exc)
+
+    def stop(self):
+        self.stopping.set()
 
 
 class InstanceLock:
@@ -368,9 +487,6 @@ def make_server(storage, port=8765):
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-            origin = self.headers.get('Origin', '')
-            if self.path == '/api/qwen/bridge' and origin.startswith('chrome-extension://'):
-                self.send_header('Access-Control-Allow-Origin', origin)
             self.end_headers()
             self.wfile.write(data)
 
@@ -386,38 +502,6 @@ def make_server(storage, port=8765):
                 self.send(403, {'error': 'Обновите страницу приложения.'})
                 return False
             return True
-
-        def bridge_allowed(self):
-            expected_host = f'127.0.0.1:{self.server.server_port}'
-            if self.headers.get('Host') != expected_host:
-                self.send(403, {'error': 'Недопустимый адрес моста Qwen.'})
-                return False
-            origin = self.headers.get('Origin')
-            if origin and not origin.startswith('chrome-extension://'):
-                self.send(403, {'error': 'Мост Qwen доступен только расширению браузера.'})
-                return False
-            supplied = self.headers.get('X-Tooru-Bridge', '')
-            if not secrets.compare_digest(supplied, storage.bridge_token()):
-                self.send(403, {'error': 'Неверный ключ моста Qwen.'})
-                return False
-            return True
-
-        def do_OPTIONS(self):
-            if self.path != '/api/qwen/bridge':
-                self.send_response(404)
-                self.end_headers()
-                return
-            origin = self.headers.get('Origin', '')
-            if not origin.startswith('chrome-extension://'):
-                self.send_response(403)
-                self.end_headers()
-                return
-            self.send_response(204)
-            self.send_header('Access-Control-Allow-Origin', origin)
-            self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Tooru-Bridge')
-            self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-            self.send_header('Access-Control-Max-Age', '600')
-            self.end_headers()
 
         def do_GET(self):
             if not self.allowed(self.path.startswith('/api/')):
@@ -435,8 +519,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.state())
                 elif self.path == '/api/diagnostics':
                     self.send(200, storage.diagnostics())
-                elif self.path == '/api/qwen/status':
-                    self.send(200, storage.qwen_state())
+                elif self.path == '/api/learning/status':
+                    self.send(200, storage.learning_state())
                 else:
                     self.send(404, {'error': 'Страница не найдена.'})
             except Exception:
@@ -444,11 +528,7 @@ def make_server(storage, port=8765):
                 self.send(500, {'error': 'Ошибка чтения данных. Подробности в data/logs/app.log.'})
 
         def do_POST(self):
-            bridge = self.path == '/api/qwen/bridge'
-            if bridge:
-                if not self.bridge_allowed():
-                    return
-            elif not self.allowed(True):
+            if not self.allowed(True):
                 return
             try:
                 size = int(self.headers.get('Content-Length', '0'))
@@ -457,9 +537,7 @@ def make_server(storage, port=8765):
                 item = json.loads(self.rfile.read(size))
                 if not isinstance(item, dict):
                     raise ValueError('Ожидается объект данных.')
-                if self.path == '/api/qwen/bridge':
-                    self.send(200, storage.qwen_bridge(item))
-                elif self.path == '/api/records':
+                if self.path == '/api/records':
                     self.send(201, {'id': storage.add(item)})
                 elif self.path == '/api/delete':
                     if type(item.get('id')) is not int:
@@ -477,17 +555,18 @@ def make_server(storage, port=8765):
                         db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)',
                                        [('name', name.strip()), ('theme', theme)])
                     self.send(200, {'ok': True})
-                elif self.path == '/api/qwen/open':
-                    result = open_qwen(
-                        storage.directory, 'chrome',
-                        self.server.server_port, storage.bridge_token()
-                    )
-                    storage.qwen_control('start')
-                    self.send(200, result)
-                elif self.path == '/api/qwen/control':
-                    self.send(200, storage.qwen_control(item.get('action')))
-                elif self.path == '/api/qwen/queue':
-                    self.send(201, storage.qwen_enqueue(item))
+                elif self.path == '/api/ai/config':
+                    self.send(200, storage.save_ai_config(item))
+                elif self.path == '/api/ai/test':
+                    result = call_yandex_ai(storage, 'Ответь только словом: OK.', 'Проверка связи', 32)
+                    storage.mark_ai_success()
+                    self.send(200, {'ok': True, 'answer': result['text'][:120]})
+                elif self.path == '/api/learning/control':
+                    self.send(200, storage.learning_control(item.get('action')))
+                elif self.path == '/api/learning/queue':
+                    self.send(201, storage.learning_enqueue(item))
+                elif self.path == '/api/learning/action':
+                    self.send(200, storage.learning_action(item))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
                 else:
@@ -496,7 +575,7 @@ def make_server(storage, port=8765):
                 self.send(400, {'error': str(exc)})
             except Exception:
                 logging.exception('POST failed')
-                self.send(500, {'error': 'Не удалось сохранить данные. Подробности в журнале.'})
+                self.send(500, {'error': 'Не удалось выполнить действие. Подробности в журнале.'})
 
     class Server(ThreadingHTTPServer):
         daemon_threads = True
@@ -555,11 +634,14 @@ def main(argv=None):
         finally:
             lock.close()
     server = None
+    worker = None
     try:
         storage = Storage(args.data_dir)
         logging.basicConfig(filename=storage.directory / 'logs' / 'app.log',
                             encoding='utf-8', level=logging.INFO,
                             format='%(asctime)s %(levelname)s %(message)s')
+        worker = LearningWorker(storage)
+        worker.start()
         for port in range(args.port, min(args.port + 20, 65536)):
             try:
                 server = make_server(storage, port)
@@ -591,6 +673,9 @@ def main(argv=None):
         print('Ошибка запуска:', exc)
         return 1
     finally:
+        if worker:
+            worker.stop()
+            worker.join(timeout=2)
         if server:
             server.server_close()
         state_file.unlink(missing_ok=True)
