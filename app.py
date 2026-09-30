@@ -1145,6 +1145,7 @@ class Storage:
                 'INSERT OR REPLACE INTO settings VALUES (?,?)',
                 [
                     ('brain_auto_learning', '1' if enabled else '0'),
+                    ('learning_mode', 'running' if enabled else 'paused'),
                     ('brain_auto_min_confidence', str(min_confidence)),
                     ('brain_auto_daily_limit', str(daily_limit)),
                     ('brain_auto_chain_limit', str(chain_limit)),
