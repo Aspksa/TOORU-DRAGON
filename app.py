@@ -40,7 +40,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 6:
+            if version > 7:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -62,6 +62,7 @@ class Storage:
                     last_error TEXT NOT NULL DEFAULT '',
                     input_tokens INTEGER NOT NULL DEFAULT 0,
                     output_tokens INTEGER NOT NULL DEFAULT 0,
+                    review_json TEXT NOT NULL DEFAULT '{}',
                     context_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -94,6 +95,18 @@ class Storage:
                 );
                 CREATE INDEX IF NOT EXISTS brain_suggestions_status_id
                     ON brain_suggestions(status, id DESC);
+                CREATE TABLE IF NOT EXISTS brain_goals (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    plan_json TEXT NOT NULL DEFAULT '[]',
+                    progress_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS brain_goals_status_id
+                    ON brain_goals(status, id DESC);
             ''')
             if version < 3:
                 old_queue = db.execute(
@@ -164,6 +177,25 @@ class Storage:
                         ON brain_suggestions(status, id DESC);
                 """)
                 db.execute('PRAGMA user_version=6')
+            if version < 7:
+                columns = {row['name'] for row in db.execute('PRAGMA table_info(learning_queue)').fetchall()}
+                if 'review_json' not in columns:
+                    db.execute("ALTER TABLE learning_queue ADD COLUMN review_json TEXT NOT NULL DEFAULT '{}'")
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS brain_goals (
+                        id INTEGER PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        plan_json TEXT NOT NULL DEFAULT '[]',
+                        progress_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS brain_goals_status_id
+                        ON brain_goals(status, id DESC);
+                """)
+                db.execute('PRAGMA user_version=7')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
