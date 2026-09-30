@@ -178,7 +178,7 @@ function learningPanel(){
   return `<section class="learning-shell">
     <div class="learning-hero"><div><span class="eyebrow">Автоматическое обучение</span><h2>Тори ↔ Qwen</h2><p>Здесь видно весь учебный диалог: что Тори спрашивает и что Qwen отвечает.</p></div><span class="model-pill">Qwen3.6 35B</span></div>
     <div class="learning-statusbar compact-status">
-      <div class="status-chip"><i class="status-dot ${q.last_success>0?'is-on':q.configured?'is-warn':'is-off'}"></i><span>AI</span><strong>${q.last_success>0?'Подключён':q.configured?'Ключ сохранён':'Не настроен'}</strong></div>
+      <div class="status-chip"><i class="status-dot ${q.last_success>0?'is-on':q.configured?'is-warn':'is-off'}"></i><span>AI</span><strong>${q.last_success>0?'Подключён':q.configured?'Авторизация не проверена':'Не настроен'}</strong></div>
       <div class="status-chip"><i class="status-dot ${q.mode==='running'?'is-on':q.mode==='paused'?'is-warn':'is-off'}"></i><span>Режим</span><strong id="learning-status">${modeText}</strong></div>
       <div class="status-chip"><i class="status-dot is-idle"></i><span>Очередь</span><strong id="queue-status">${active}</strong></div>
       <div class="status-chip"><i class="status-dot is-on"></i><span>Знания</span><strong id="memory-status">${q.knowledge_count||0}</strong></div>
