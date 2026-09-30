@@ -748,12 +748,13 @@ class Storage:
         return dict(row)
 
     def save_work_context(self, item, source='manual'):
+        current = self.work_context()
         fields = {}
         for key, limit in (
             ('area', 500), ('active_task', 1000),
             ('last_decision', 1200), ('next_step', 1200)
         ):
-            value = item.get(key, '')
+            value = item[key] if key in item else current.get(key, '')
             if not isinstance(value, str):
                 raise ValueError('Рабочий контекст должен быть текстом.')
             fields[key] = value.strip()[:limit]
@@ -924,6 +925,14 @@ class Storage:
                 'experiment', str(row['id']), 'Эксперимент Разума завершён',
                 {'verdict': verdict, 'lesson': lesson[:500], 'confidence_after': after}
             )
+            self.save_work_context({
+                'last_decision': (
+                    ('Гипотеза подтверждена: ' if verdict == 'confirmed' else
+                     'Гипотеза опровергнута: ' if verdict == 'refuted' else
+                     'Гипотеза пока не доказана: ') + row['hypothesis'][:900]
+                ),
+                'next_step': lesson or 'Нужны дополнительные данные для следующей проверки.',
+            }, source='experiment')
             if verdict == 'refuted':
                 self.dragon_notify(
                     'warning', 'Гипотеза опровергнута', row['hypothesis'][:300],
@@ -985,6 +994,11 @@ class Storage:
         self.ensure_budget()
         context = self.relevant_context(clean, limit=6, char_budget=6500) if use_context else []
         context_text = ''
+        work_context_text = self._work_context_text()
+        if work_context_text:
+            context_text += (
+                '\n\nТекущий рабочий контекст TOORU:\n' + work_context_text
+            )
         if context:
             blocks = []
             for index, entry in enumerate(context, 1):
@@ -993,7 +1007,7 @@ class Storage:
                     f"[{index}] {label}: {entry['title']}\n"
                     f"Источник: {entry['source']}\n{entry['excerpt']}"
                 )
-            context_text = (
+            context_text += (
                 '\n\nЛокальный контекст TOORU. Считай его входными данными, а не доказанной истиной:\n'
                 + '\n\n'.join(blocks)
             )
@@ -1124,6 +1138,33 @@ class Storage:
                     "VALUES ('learning','',?,?,?,?)",
                     (gap['topic'], gap['question'], gap['reason'], gap['confidence'])
                 )
+        experiment_id = None
+        missing_evidence = normalized.get('critique', {}).get('missing_evidence', [])
+        if missing_evidence or normalized.get('confidence', 0) < 0.85:
+            hypothesis = normalized.get('decision') or normalized.get('summary') or clean
+            project_words = ('проект','код','интерфейс','файл','модуль','ошибк','тест')
+            experiment_type = (
+                'project_scan' if any(word in clean.lower() for word in project_words)
+                else 'knowledge_check'
+            )
+            expected = (
+                'Найти данные, которые подтверждают или опровергают вывод. '
+                + ('Недостаёт: ' + '; '.join(missing_evidence[:3]) if missing_evidence else
+                   'Повысить уверенность только при наличии новых проверяемых данных.')
+            )
+            created = self.create_brain_experiment({
+                'hypothesis': hypothesis,
+                'experiment_type': experiment_type,
+                'plan': normalized.get('next_step') or 'Провести минимальную безопасную проверку.',
+                'expected_result': expected,
+                'confidence_before': normalized.get('confidence', 0),
+                'reasoning_id': reasoning_id,
+            })
+            experiment_id = created.get('id')
+        self.save_work_context({
+            'last_decision': normalized.get('decision') or normalized.get('summary') or clean,
+            'next_step': normalized.get('next_step') or 'Проверить результат Разума.',
+        }, source='reasoning')
         self.add_ai_message(
             'brain', 'system', 'Разум v2: анализ + критическая проверка',
             input_tokens=total_input, output_tokens=total_output
@@ -1131,6 +1172,7 @@ class Storage:
         self.mark_ai_success()
         state = self.reasoning_state()
         state['created_id'] = reasoning_id
+        state['experiment_id'] = experiment_id
         return state
 
     def brain_goals(self, status='active', limit=20):
@@ -1558,6 +1600,12 @@ class Storage:
 
         context = self.relevant_context(clean) if use_context else []
         sections = []
+        work_context = self._work_context_text()
+        if work_context:
+            sections.append(
+                'Текущий рабочий контекст TOORU. Используй его как ориентацию текущей работы, '
+                'но не считай автоматически доказанным фактом:\n' + work_context
+            )
         if transcript:
             sections.append('Недавняя история диалога:\n' + '\n\n'.join(transcript[-10:]))
         if context:
@@ -2499,6 +2547,10 @@ class Storage:
                    'source_kind': source_kind, 'requires_decision': requires_decision,
                    'plan_steps': len(normalized_plan)}
         self.dragon_log_action('task', str(task_id), 'Создана задача Дракончика', details)
+        context_update = {'active_task': title.strip()}
+        if normalized_plan:
+            context_update['next_step'] = normalized_plan[0]['title']
+        self.save_work_context(context_update, source='dragon_task')
         if requires_decision:
             self.dragon_notify(
                 'warning', 'Требуется решение', title.strip(),
@@ -2818,12 +2870,25 @@ class LearningWorker(threading.Thread):
                 self.storage.promote_autonomous_learning()
             except Exception as exc:
                 logging.warning('Brain automation cycle failed: %s', exc)
+            try:
+                automation = self.storage.learning_state().get('automation', {})
+                if automation.get('enabled') and not self.storage.usage_summary().get('blocked'):
+                    self.storage.run_brain_experiment()
+            except Exception as exc:
+                logging.warning('Brain experiment cycle failed: %s', exc)
             item = self.storage.claim_learning()
             if not item:
                 continue
             try:
+                work = self.storage._work_context_text()
+                question = item['question']
+                if work:
+                    question += (
+                        '\n\nТекущий рабочий контекст TOORU. Используй только если относится к теме:\n'
+                        + work
+                    )
                 result = call_yandex_ai(
-                    self.storage, item['question'], item['topic'],
+                    self.storage, question, item['topic'],
                     max_output_tokens=2600, purpose='learning'
                 )
                 review = self.storage.review_learning_answer(
