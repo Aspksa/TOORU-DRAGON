@@ -33,7 +33,7 @@ def find_browser(browser):
         'chrome': ('Google/Chrome/Application/chrome.exe', 'Google Chrome'),
     }
     if browser != 'chrome':
-        raise ValueError('Для браузера Тори используется только Google Chrome.')
+        raise ValueError('Браузер Тори использует отдельный профиль на базе Google Chrome.')
     relative, name = locations[browser]
     for key in ('PROGRAMFILES(X86)', 'PROGRAMFILES', 'LOCALAPPDATA'):
         root = os.environ.get(key)
@@ -41,7 +41,7 @@ def find_browser(browser):
             candidate = Path(root) / relative
             if candidate.is_file():
                 return candidate
-    raise ValueError(f'{name} не найден. Установите Google Chrome и повторите запуск.')
+    raise ValueError(f'{name} не найден. Для Браузера Тори требуется установленный Google Chrome.')
 
 
 def open_qwen(directory, browser, port, bridge_token):
@@ -66,10 +66,10 @@ def open_qwen(directory, browser, port, bridge_token):
     except OSError as exc:
         raise ValueError('Не удалось запустить браузер Тори. Проверьте установку браузера.') from exc
     note = (
-        'Qwen открыт в отдельном профиле. Мост будет считаться подключённым после первого '
-        'сигнала со страницы. В Google Chrome 137+ автоматическая загрузка unpacked-расширения '
-        'может быть отключена: один раз откройте chrome://extensions, включите режим разработчика '
-        'и загрузите папку browser\\qwen-bridge.'
+        'Браузер Тори открыт. Наблюдение включено автоматически. '
+        'Когда мост установит связь с Qwen, статус в разделе «Обучение» обновится сам. '
+        'Если мост не подключается, откройте настройки расширений Браузера Тори и '
+        'загрузите папку browser\\qwen-bridge как распакованное расширение.'
     )
     return {'message': note, 'extension_path': str(extension)}
 
