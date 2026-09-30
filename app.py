@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import urllib.request
+from urllib.parse import urlencode
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -44,20 +45,34 @@ def find_browser(browser):
     raise ValueError(f'{name} не найден. Выберите другой установленный браузер.')
 
 
-def open_qwen(directory, browser):
+def open_qwen(directory, browser, port, bridge_token):
     executable = find_browser(browser)
-    # Separate directories prevent Edge and Chrome from sharing incompatible data.
     profile = Path(directory).resolve() / 'browser-profile' / browser
     profile.mkdir(parents=True, exist_ok=True)
+    extension = ROOT / 'browser' / 'qwen-bridge'
+    if not extension.is_dir():
+        raise ValueError('Мост Qwen отсутствует. Обновите файлы TOORU · DRAGON.')
+    fragment = urlencode({'tooru_port': int(port), 'tooru_bridge': bridge_token})
+    qwen_url = 'https://chat.qwen.ai/#' + fragment
+    command = [
+        str(executable),
+        '--user-data-dir=' + str(profile),
+        '--load-extension=' + str(extension),
+        '--new-window',
+        qwen_url,
+    ]
     try:
-        subprocess.Popen([str(executable), '--user-data-dir=' + str(profile),
-                          '--new-window', 'https://chat.qwen.ai'],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
     except OSError as exc:
         raise ValueError('Не удалось запустить браузер Тори. Проверьте установку браузера.') from exc
-    return {'message': 'Команда открытия Qwen отправлена. Войдите в аккаунт в отдельном окне. '
-                       'Наблюдение и автоматические вопросы пока не подключены.'}
+    note = (
+        'Qwen открыт в отдельном профиле. Мост будет считаться подключённым после первого '
+        'сигнала со страницы. В Google Chrome 137+ автоматическая загрузка unpacked-расширения '
+        'может быть отключена: один раз откройте chrome://extensions, включите режим разработчика '
+        'и загрузите папку browser\\qwen-bridge.'
+    )
+    return {'message': note, 'extension_path': str(extension)}
 
 
 class Storage:
@@ -69,7 +84,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -81,10 +96,35 @@ class Storage:
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 CREATE INDEX IF NOT EXISTS records_kind_id ON records(kind, id DESC);
-                PRAGMA user_version=1;
+                CREATE TABLE IF NOT EXISTS qwen_queue (
+                    id INTEGER PRIMARY KEY,
+                    topic TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS qwen_queue_status_id ON qwen_queue(status, id);
+                CREATE TABLE IF NOT EXISTS qwen_events (
+                    id INTEGER PRIMARY KEY,
+                    role TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    digest TEXT NOT NULL UNIQUE,
+                    queue_id INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS qwen_events_id ON qwen_events(id DESC);
+                PRAGMA user_version=2;
             ''')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('qwen_mode', 'stopped'))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('qwen_owner', 'user'))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('qwen_last_seen', '0'))
+            if not db.execute("SELECT 1 FROM settings WHERE key='secret.qwen_bridge'").fetchone():
+                db.execute('INSERT INTO settings VALUES (?,?)',
+                           ('secret.qwen_bridge', secrets.token_urlsafe(32)))
 
     @contextmanager
     def connect(self):
@@ -98,13 +138,16 @@ class Storage:
 
     def state(self):
         with self.connect() as db:
-            settings = dict(db.execute('SELECT key, value FROM settings').fetchall())
+            settings = dict(db.execute(
+                "SELECT key, value FROM settings WHERE key NOT LIKE 'secret.%'"
+            ).fetchall())
             counts = dict(db.execute('SELECT kind, count(*) FROM records GROUP BY kind').fetchall())
             records = {kind: [dict(row) for row in db.execute(
                 'SELECT * FROM records WHERE kind=? ORDER BY id DESC LIMIT 200', (kind,)
             )] for kind in sorted(KINDS)}
+        qwen = self.qwen_state()
         return dict(version=VERSION, settings=settings, counts=counts, records=records,
-                    ai_connected=False, qwen_connected=False)
+                    ai_connected=False, qwen_connected=qwen['connected'], qwen=qwen)
 
     def add(self, item):
         kind, title = item.get('kind'), item.get('title', '')
@@ -117,6 +160,144 @@ class Storage:
             cursor = db.execute('INSERT INTO records(kind,title,body) VALUES (?,?,?)',
                                 (kind, title.strip(), body.strip()))
             return cursor.lastrowid
+
+
+    def bridge_token(self):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='secret.qwen_bridge'").fetchone()
+        if not row:
+            raise RuntimeError('Не найден локальный ключ моста Qwen.')
+        return row[0]
+
+    def qwen_state(self):
+        with self.connect() as db:
+            settings = dict(db.execute(
+                "SELECT key, value FROM settings WHERE key IN ('qwen_mode','qwen_owner','qwen_last_seen')"
+            ).fetchall())
+            queue = [dict(row) for row in db.execute(
+                "SELECT id,topic,question,status,created_at,updated_at FROM qwen_queue ORDER BY id DESC LIMIT 50"
+            )]
+            events = [dict(row) for row in db.execute(
+                "SELECT id,role,substr(text,1,800) AS text,source_url,queue_id,created_at "
+                "FROM qwen_events ORDER BY id DESC LIMIT 50"
+            )]
+        try:
+            last_seen = float(settings.get('qwen_last_seen', '0'))
+        except ValueError:
+            last_seen = 0
+        connected = last_seen > 0 and time.time() - last_seen < 20
+        return {
+            'mode': settings.get('qwen_mode', 'stopped'),
+            'owner': settings.get('qwen_owner', 'user'),
+            'connected': connected,
+            'last_seen': last_seen,
+            'queue': queue,
+            'events': events,
+        }
+
+    def qwen_control(self, action):
+        if action not in {'start', 'pause', 'stop', 'handoff', 'takeover'}:
+            raise ValueError('Неизвестная команда управления Qwen.')
+        values = {}
+        if action == 'start':
+            values['qwen_mode'] = 'observe'
+        elif action == 'pause':
+            values['qwen_mode'] = 'paused'
+        elif action == 'stop':
+            values.update(qwen_mode='stopped', qwen_owner='user')
+        elif action == 'handoff':
+            values.update(qwen_mode='observe', qwen_owner='tori')
+        elif action == 'takeover':
+            values['qwen_owner'] = 'user'
+        with self.connect() as db:
+            db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)', values.items())
+        return self.qwen_state()
+
+    def qwen_enqueue(self, item):
+        topic = item.get('topic', '')
+        question = item.get('question', '')
+        if not isinstance(topic, str) or not 1 <= len(topic.strip()) <= 300:
+            raise ValueError('Тема должна содержать от 1 до 300 символов.')
+        if not isinstance(question, str) or not 1 <= len(question.strip()) <= 8000:
+            raise ValueError('Вопрос должен содержать от 1 до 8 000 символов.')
+        with self.connect() as db:
+            cursor = db.execute(
+                'INSERT INTO qwen_queue(topic,question) VALUES (?,?)',
+                (topic.strip(), question.strip())
+            )
+        return {'id': cursor.lastrowid}
+
+    def qwen_bridge(self, item):
+        action = item.get('action')
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                       ('qwen_last_seen', str(time.time())))
+            if action == 'poll':
+                values = dict(db.execute(
+                    "SELECT key,value FROM settings WHERE key IN ('qwen_mode','qwen_owner')"
+                ).fetchall())
+                row = None
+                if values.get('qwen_mode') == 'observe' and values.get('qwen_owner') == 'tori':
+                    row = db.execute(
+                        "SELECT id,topic,question FROM qwen_queue WHERE status='pending' ORDER BY id LIMIT 1"
+                    ).fetchone()
+                return {
+                    'mode': values.get('qwen_mode', 'stopped'),
+                    'owner': values.get('qwen_owner', 'user'),
+                    'item': dict(row) if row else None,
+                }
+            if action == 'claim':
+                queue_id = item.get('queue_id')
+                if type(queue_id) is not int:
+                    raise ValueError('Некорректный номер вопроса.')
+                db.execute(
+                    "UPDATE qwen_queue SET status='sent', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                    "WHERE id=? AND status='pending'",
+                    (queue_id,)
+                )
+                return {'ok': True}
+            if action == 'event':
+                role = item.get('role')
+                text = item.get('text', '')
+                source_url = item.get('source_url', '')
+                queue_id = item.get('queue_id')
+                if role not in {'user', 'assistant'}:
+                    raise ValueError('Неизвестный автор сообщения Qwen.')
+                if not isinstance(text, str) or not 1 <= len(text.strip()) <= 50000:
+                    raise ValueError('Некорректный текст сообщения Qwen.')
+                if not isinstance(source_url, str) or not source_url.startswith('https://chat.qwen.ai'):
+                    raise ValueError('Недопустимый источник Qwen.')
+                if queue_id is not None and type(queue_id) is not int:
+                    raise ValueError('Некорректная связь с очередью.')
+                clean = text.strip()
+                digest = hashlib.sha256(
+                    (role + '\0' + clean + '\0' + source_url).encode('utf-8')
+                ).hexdigest()
+                cursor = db.execute(
+                    'INSERT OR IGNORE INTO qwen_events(role,text,source_url,digest,queue_id) VALUES (?,?,?,?,?)',
+                    (role, clean, source_url, digest, queue_id)
+                )
+                inserted = cursor.rowcount == 1
+                if inserted and role == 'assistant' and queue_id is not None:
+                    queued = db.execute(
+                        'SELECT topic,question FROM qwen_queue WHERE id=?', (queue_id,)
+                    ).fetchone()
+                    if queued:
+                        db.execute(
+                            "UPDATE qwen_queue SET status='done', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                            "WHERE id=?",
+                            (queue_id,)
+                        )
+                        body = clean[:20000]
+                        db.execute(
+                            'INSERT INTO records(kind,title,body,source) VALUES (?,?,?,?)',
+                            ('knowledge', 'Qwen · ' + queued['topic'], body,
+                             'Qwen · ' + source_url)
+                        )
+                return {'ok': True, 'inserted': inserted}
+            if action == 'heartbeat':
+                return {'ok': True}
+        raise ValueError('Неизвестное действие моста Qwen.')
 
     def backup(self):
         destination = self.directory / 'backups' / (time.strftime('tooru-%Y%m%d-%H%M%S-') + secrets.token_hex(3) + '.sqlite3')
@@ -131,7 +312,8 @@ class Storage:
                     python=sys.version.split()[0], version=VERSION,
                     database_bytes=self.path.stat().st_size,
                     data_directory=str(self.directory),
-                    ai='Не подключён', qwen='Не подключён',
+                    ai='Не подключён',
+                    qwen='Подключён' if self.qwen_state()['connected'] else 'Не подключён',
                     access='Только этот компьютер')
 
 
@@ -179,6 +361,9 @@ def make_server(storage, port=8765):
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            origin = self.headers.get('Origin', '')
+            if self.path == '/api/qwen/bridge' and origin.startswith('chrome-extension://'):
+                self.send_header('Access-Control-Allow-Origin', origin)
             self.end_headers()
             self.wfile.write(data)
 
@@ -194,6 +379,38 @@ def make_server(storage, port=8765):
                 self.send(403, {'error': 'Обновите страницу приложения.'})
                 return False
             return True
+
+        def bridge_allowed(self):
+            expected_host = f'127.0.0.1:{self.server.server_port}'
+            if self.headers.get('Host') != expected_host:
+                self.send(403, {'error': 'Недопустимый адрес моста Qwen.'})
+                return False
+            origin = self.headers.get('Origin')
+            if origin and not origin.startswith('chrome-extension://'):
+                self.send(403, {'error': 'Мост Qwen доступен только расширению браузера.'})
+                return False
+            supplied = self.headers.get('X-Tooru-Bridge', '')
+            if not secrets.compare_digest(supplied, storage.bridge_token()):
+                self.send(403, {'error': 'Неверный ключ моста Qwen.'})
+                return False
+            return True
+
+        def do_OPTIONS(self):
+            if self.path != '/api/qwen/bridge':
+                self.send_response(404)
+                self.end_headers()
+                return
+            origin = self.headers.get('Origin', '')
+            if not origin.startswith('chrome-extension://'):
+                self.send_response(403)
+                self.end_headers()
+                return
+            self.send_response(204)
+            self.send_header('Access-Control-Allow-Origin', origin)
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Tooru-Bridge')
+            self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+            self.send_header('Access-Control-Max-Age', '600')
+            self.end_headers()
 
         def do_GET(self):
             if not self.allowed(self.path.startswith('/api/')):
@@ -218,7 +435,11 @@ def make_server(storage, port=8765):
                 self.send(500, {'error': 'Ошибка чтения данных. Подробности в data/logs/app.log.'})
 
         def do_POST(self):
-            if not self.allowed(True):
+            bridge = self.path == '/api/qwen/bridge'
+            if bridge:
+                if not self.bridge_allowed():
+                    return
+            elif not self.allowed(True):
                 return
             try:
                 size = int(self.headers.get('Content-Length', '0'))
@@ -227,7 +448,9 @@ def make_server(storage, port=8765):
                 item = json.loads(self.rfile.read(size))
                 if not isinstance(item, dict):
                     raise ValueError('Ожидается объект данных.')
-                if self.path == '/api/records':
+                if self.path == '/api/qwen/bridge':
+                    self.send(200, storage.qwen_bridge(item))
+                elif self.path == '/api/records':
                     self.send(201, {'id': storage.add(item)})
                 elif self.path == '/api/delete':
                     if type(item.get('id')) is not int:
@@ -246,7 +469,14 @@ def make_server(storage, port=8765):
                                        [('name', name.strip()), ('theme', theme)])
                     self.send(200, {'ok': True})
                 elif self.path == '/api/qwen/open':
-                    self.send(200, open_qwen(storage.directory, item.get('browser', 'edge')))
+                    self.send(200, open_qwen(
+                        storage.directory, item.get('browser', 'edge'),
+                        self.server.server_port, storage.bridge_token()
+                    ))
+                elif self.path == '/api/qwen/control':
+                    self.send(200, storage.qwen_control(item.get('action')))
+                elif self.path == '/api/qwen/queue':
+                    self.send(201, storage.qwen_enqueue(item))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
                 else:
