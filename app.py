@@ -61,7 +61,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 11:
+            if version > 12:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -138,6 +138,33 @@ class Storage:
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 CREATE INDEX IF NOT EXISTS brain_reasoning_id ON brain_reasoning(id DESC);
+                CREATE TABLE IF NOT EXISTS work_context (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    area TEXT NOT NULL DEFAULT '',
+                    active_task TEXT NOT NULL DEFAULT '',
+                    last_decision TEXT NOT NULL DEFAULT '',
+                    next_step TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE TABLE IF NOT EXISTS brain_experiments (
+                    id INTEGER PRIMARY KEY,
+                    hypothesis TEXT NOT NULL,
+                    experiment_type TEXT NOT NULL DEFAULT 'knowledge_check',
+                    plan TEXT NOT NULL DEFAULT '',
+                    expected_result TEXT NOT NULL DEFAULT '',
+                    actual_result TEXT NOT NULL DEFAULT '',
+                    verdict TEXT NOT NULL DEFAULT 'planned',
+                    confidence_before REAL NOT NULL DEFAULT 0,
+                    confidence_after REAL NOT NULL DEFAULT 0,
+                    lesson TEXT NOT NULL DEFAULT '',
+                    reasoning_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS brain_experiments_status_id
+                    ON brain_experiments(status, id DESC);
                 CREATE TABLE IF NOT EXISTS dragon_notifications (
                     id INTEGER PRIMARY KEY,
                     level TEXT NOT NULL DEFAULT 'info',
@@ -342,6 +369,37 @@ class Storage:
                 if 'requires_decision' not in task_columns:
                     db.execute("ALTER TABLE dragon_tasks ADD COLUMN requires_decision INTEGER NOT NULL DEFAULT 0")
                 db.execute('PRAGMA user_version=11')
+            if version < 12:
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS work_context (
+                        id INTEGER PRIMARY KEY CHECK (id=1),
+                        area TEXT NOT NULL DEFAULT '',
+                        active_task TEXT NOT NULL DEFAULT '',
+                        last_decision TEXT NOT NULL DEFAULT '',
+                        next_step TEXT NOT NULL DEFAULT '',
+                        source TEXT NOT NULL DEFAULT 'manual',
+                        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE TABLE IF NOT EXISTS brain_experiments (
+                        id INTEGER PRIMARY KEY,
+                        hypothesis TEXT NOT NULL,
+                        experiment_type TEXT NOT NULL DEFAULT 'knowledge_check',
+                        plan TEXT NOT NULL DEFAULT '',
+                        expected_result TEXT NOT NULL DEFAULT '',
+                        actual_result TEXT NOT NULL DEFAULT '',
+                        verdict TEXT NOT NULL DEFAULT 'planned',
+                        confidence_before REAL NOT NULL DEFAULT 0,
+                        confidence_after REAL NOT NULL DEFAULT 0,
+                        lesson TEXT NOT NULL DEFAULT '',
+                        reasoning_id INTEGER,
+                        status TEXT NOT NULL DEFAULT 'planned',
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS brain_experiments_status_id
+                        ON brain_experiments(status, id DESC);
+                """)
+                db.execute('PRAGMA user_version=12')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
@@ -368,6 +426,15 @@ class Storage:
                 ('dragon_mode', 'suggest'),
             ):
                 db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', (key, value))
+            db.execute(
+                "INSERT OR IGNORE INTO work_context(id,area,active_task,last_decision,next_step,source) "
+                "VALUES (1,?,?,?,?,?)",
+                ('TOORU · DRAGON / развитие Дракончика',
+                 'Связать чат, задачи, Разум и проверку результата',
+                 'Широкие изменения требуют подтверждения',
+                 'Проверять гипотезы безопасными экспериментами',
+                 'system')
+            )
 
     @contextmanager
     def connect(self):
