@@ -61,7 +61,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 10:
+            if version > 11:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -141,6 +141,8 @@ class Storage:
                 CREATE TABLE IF NOT EXISTS dragon_notifications (
                     id INTEGER PRIMARY KEY,
                     level TEXT NOT NULL DEFAULT 'info',
+                    category TEXT NOT NULL DEFAULT 'important',
+                    group_key TEXT NOT NULL DEFAULT '',
                     title TEXT NOT NULL,
                     body TEXT NOT NULL DEFAULT '',
                     action TEXT NOT NULL DEFAULT '',
@@ -164,8 +166,12 @@ class Storage:
                     title TEXT NOT NULL,
                     action_type TEXT NOT NULL,
                     payload_json TEXT NOT NULL DEFAULT '{}',
+                    plan_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL DEFAULT 'pending',
                     result_json TEXT NOT NULL DEFAULT '{}',
+                    source_kind TEXT NOT NULL DEFAULT 'manual',
+                    source_message_id INTEGER,
+                    requires_decision INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
@@ -316,6 +322,26 @@ class Storage:
                         ON dragon_tasks(status, id);
                 """)
                 db.execute('PRAGMA user_version=10')
+            if version < 11:
+                notification_columns = {row['name'] for row in db.execute(
+                    'PRAGMA table_info(dragon_notifications)'
+                ).fetchall()}
+                if 'category' not in notification_columns:
+                    db.execute("ALTER TABLE dragon_notifications ADD COLUMN category TEXT NOT NULL DEFAULT 'important'")
+                if 'group_key' not in notification_columns:
+                    db.execute("ALTER TABLE dragon_notifications ADD COLUMN group_key TEXT NOT NULL DEFAULT ''")
+                task_columns = {row['name'] for row in db.execute(
+                    'PRAGMA table_info(dragon_tasks)'
+                ).fetchall()}
+                if 'plan_json' not in task_columns:
+                    db.execute("ALTER TABLE dragon_tasks ADD COLUMN plan_json TEXT NOT NULL DEFAULT '[]'")
+                if 'source_kind' not in task_columns:
+                    db.execute("ALTER TABLE dragon_tasks ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'manual'")
+                if 'source_message_id' not in task_columns:
+                    db.execute("ALTER TABLE dragon_tasks ADD COLUMN source_message_id INTEGER")
+                if 'requires_decision' not in task_columns:
+                    db.execute("ALTER TABLE dragon_tasks ADD COLUMN requires_decision INTEGER NOT NULL DEFAULT 0")
+                db.execute('PRAGMA user_version=11')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
