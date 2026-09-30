@@ -28,21 +28,83 @@ function settingsForm(profile) {
   return `<form id="settings-form" class="panel"><h2>${profile?'Твой профиль':'Параметры интерфейса'}</h2><label for="name">Имя</label><input id="name" name="name" maxlength="80" value="${escapeHtml(state.settings.name)}" required><label for="theme">Оформление</label><select id="theme" name="theme"><option value="system">Как в системе</option><option value="light">Светлое</option><option value="dark">Тёмное</option></select><button class="primary">Сохранить настройки</button></form>`;
 }
 
+function qwenQueueMarkup(q) {
+  const labels={pending:'В очереди',sent:'Ждём ответ',done:'Готово'};
+  const rows=q.queue||[];
+  return rows.length ? rows.map(x=>`<article class="queue-item"><div><span class="queue-topic">${escapeHtml(x.topic)}</span><p>${escapeHtml(x.question)}</p></div><span class="queue-state state-${escapeHtml(x.status)}">${labels[x.status]||escapeHtml(x.status)}</span></article>`).join('') : '<div class="empty-state">Очередь пуста. Добавь первый вопрос для Тори.</div>';
+}
+function qwenJournalMarkup(q) {
+  const rows=(q.events||[]).slice(0,5);
+  return rows.length ? rows.map(x=>`<article class="journal-item"><span class="journal-role">${x.role==='assistant'?'Qwen':'Ты'}</span><p>${escapeHtml(x.text)}</p><time>${escapeHtml(new Date(x.created_at).toLocaleString('ru-RU'))}</time></article>`).join('') : '<div class="empty-state">Здесь появятся последние сообщения из учебной сессии.</div>';
+}
+function qwenSessionMarkup(q) {
+  const rows=q.queue||[];
+  const active=rows.find(x=>x.status==='sent')||rows.find(x=>x.status==='pending');
+  const done=rows.filter(x=>x.status==='done').length;
+  const total=rows.length;
+  const title=active ? escapeHtml(active.topic) : 'Нет активного вопроса';
+  const text=active ? escapeHtml(active.question) : 'Добавь вопрос в очередь — Тори возьмёт его, когда получит управление.';
+  return `<div class="session-main"><span class="eyebrow">Текущая сессия</span><h3>${title}</h3><p>${text}</p></div><div class="session-progress"><strong>${done}/${total}</strong><span>готово</span></div>`;
+}
 function qwenPanel() {
   const q=state.qwen||{mode:'stopped',owner:'user',connected:false,queue:[],events:[]};
   const bridgeText=q.connected?'Подключён':'Не подключён';
-  const modeText={observe:'Тори наблюдает',paused:'Обучение на паузе',stopped:'Обучение остановлено'}[q.mode]||q.mode;
-  const ownerText=q.owner==='tori'?'Диалог передан Тори':'Диалог у тебя';
+  const modeText={observe:'Наблюдает',paused:'Пауза',stopped:'Остановлено'}[q.mode]||q.mode;
+  const ownerText=q.owner==='tori'?'Управляет Тори':'Управляешь ты';
   const memoryCount=q.memory_count ?? state.counts.memory ?? 0;
   const knowledgeCount=q.knowledge_count ?? state.counts.knowledge ?? 0;
-  const queue=(q.queue||[]).map(x=>`<article class="record"><div class="row"><h3>${escapeHtml(x.topic)}</h3><span class="badge">${escapeHtml(x.status)}</span></div><p>${escapeHtml(x.question)}</p></article>`).join('');
-  const events=(q.events||[]).slice(0,8).map(x=>`<article class="record"><div class="row"><h3>${x.role==='assistant'?'Qwen':'Пользователь'}</h3><span class="meta">${escapeHtml(new Date(x.created_at).toLocaleString('ru-RU'))}</span></div><p>${escapeHtml(x.text)}</p></article>`).join('');
   const startDisabled=q.mode==='observe'?'disabled':'';
   const pauseDisabled=q.mode==='paused'?'disabled':'';
   const stopDisabled=q.mode==='stopped'?'disabled':'';
   const handoffDisabled=q.owner==='tori'?'disabled':'';
   const takeoverDisabled=q.owner==='user'?'disabled':'';
-  return `<section class="panel training-overview"><h2>Обучение Тори через Qwen</h2><p>Открой Chrome Тори — наблюдение включится автоматически. Пока диалог у тебя, Тори только читает выбранный чат. После передачи управления она может отправлять вопросы из очереди.</p><div class="status-grid"><div class="status-card"><span>Chrome Тори</span><strong>Отдельный профиль</strong><small>data/browser-profile/chrome</small></div><div class="status-card"><span>Мост</span><strong id="bridge-status">${bridgeText}</strong><small id="bridge-help">${q.connected?'Связь с открытой вкладкой Qwen есть':'Открой Chrome Тори и вкладку Qwen'}</small></div><div class="status-card"><span>Обучение</span><strong id="learning-status">${modeText}</strong><small id="owner-status">${ownerText}</small></div><div class="status-card"><span>Память</span><strong>Работает</strong><small id="memory-status">${memoryCount} память · ${knowledgeCount} знания</small></div></div><div class="control-group"><h3>1. Подключение</h3><button class="primary" data-qwen-open>Открыть Chrome Тори</button><span class="hint">При открытии наблюдение запускается автоматически.</span></div><div class="control-group"><h3>2. Наблюдение</h3><div class="row"><button class="action mode-button" data-qwen-control="start" ${startDisabled}>▶ Начать</button><button class="action mode-button" data-qwen-control="pause" ${pauseDisabled}>Ⅱ Пауза</button><button class="action mode-button danger" data-qwen-control="stop" ${stopDisabled}>■ Остановить</button></div></div><div class="control-group"><h3>3. Кто управляет диалогом</h3><div class="row"><button class="primary" data-qwen-control="handoff" ${handoffDisabled}>Передать диалог Тори</button><button class="action" data-qwen-control="takeover" ${takeoverDisabled}>Забрать управление</button></div><p class="hint">Передача управления не обходит вход, CAPTCHA и проверки Qwen. Тори отправляет только вопросы из очереди.</p></div></section><form id="qwen-queue-form" class="panel"><h2>Что Тори должна изучить</h2><p>Добавь тему и конкретный вопрос. Когда диалог передан Тори, вопросы выполняются по очереди.</p><label for="qwen-topic">Тема</label><input id="qwen-topic" name="topic" maxlength="300" required><label for="qwen-question">Вопрос Qwen</label><textarea id="qwen-question" name="question" maxlength="8000" required></textarea><button class="primary">Добавить в очередь обучения</button></form><section class="panel"><h2>Очередь обучения</h2>${queue||'<div class="empty">Очередь пуста.</div>'}</section><section class="panel"><h2>Что Тори увидела в Qwen</h2>${events||'<div class="empty">Пока сообщений нет. Открой Chrome Тори и Qwen.</div>'}</section>`;
+  return `<section class="learning-shell">
+    <div class="learning-hero">
+      <div>
+        <span class="eyebrow">TOORU · LEARNING</span>
+        <h2>Обучение Тори</h2>
+        <p>Один экран для браузера, очереди и знаний. Браузер Тори изолирован от твоего обычного браузера.</p>
+      </div>
+      <button class="primary hero-action" data-qwen-open>Открыть Браузер Тори</button>
+    </div>
+    <div class="learning-statusbar">
+      <div class="status-chip"><i class="status-dot ${q.connected?'is-on':'is-off'}"></i><span>Браузер</span><strong id="bridge-status">${bridgeText}</strong></div>
+      <div class="status-chip"><i class="status-dot ${q.mode==='observe'?'is-on':q.mode==='paused'?'is-warn':'is-off'}"></i><span>Обучение</span><strong id="learning-status">${modeText}</strong></div>
+      <div class="status-chip"><i class="status-dot ${q.owner==='tori'?'is-on':'is-idle'}"></i><span>Диалог</span><strong id="owner-status">${ownerText}</strong></div>
+      <div class="status-chip"><i class="status-dot is-on"></i><span>Память</span><strong id="memory-status">${memoryCount} · ${knowledgeCount}</strong></div>
+    </div>
+    <div class="learning-controls">
+      <div class="segmented" aria-label="Управление обучением">
+        <button class="action mode-button" data-qwen-control="start" ${startDisabled}>▶ Начать</button>
+        <button class="action mode-button" data-qwen-control="pause" ${pauseDisabled}>Ⅱ Пауза</button>
+        <button class="action mode-button" data-qwen-control="stop" ${stopDisabled}>■ Стоп</button>
+      </div>
+      <div class="handoff-actions">
+        <button class="primary" data-qwen-control="handoff" ${handoffDisabled}>Передать Тори</button>
+        <button class="action" data-qwen-control="takeover" ${takeoverDisabled}>Забрать управление</button>
+      </div>
+    </div>
+    <div class="session-card" id="session-card">${qwenSessionMarkup(q)}</div>
+  </section>
+  <div class="learning-columns">
+    <form id="qwen-queue-form" class="panel compact-panel">
+      <span class="eyebrow">Новый вопрос</span>
+      <h2>Что изучить</h2>
+      <label for="qwen-topic">Тема</label>
+      <input id="qwen-topic" name="topic" maxlength="300" placeholder="Например: Python" required>
+      <label for="qwen-question">Вопрос</label>
+      <textarea id="qwen-question" name="question" maxlength="8000" placeholder="Что Тори должна узнать?" required></textarea>
+      <button class="primary">Добавить в очередь</button>
+    </form>
+    <section class="panel compact-panel">
+      <div class="section-head"><div><span class="eyebrow">Очередь</span><h2>План обучения</h2></div></div>
+      <div id="queue-list">${qwenQueueMarkup(q)}</div>
+    </section>
+  </div>
+  <section class="panel compact-panel">
+    <div class="section-head"><div><span class="eyebrow">Последнее</span><h2>Журнал обучения</h2></div><span class="memory-summary" id="memory-summary">${knowledgeCount} знаний</span></div>
+    <div class="journal-list" id="journal-list">${qwenJournalMarkup(q)}</div>
+  </section>`;
 }
 function render() {
   document.getElementById('title').textContent = labels[page];
@@ -58,7 +120,7 @@ function render() {
     if(tab==='chat') html+='<section class="panel"><h2>Тори ещё не подключена</h2><p>Можно сохранять свои сообщения. Ответы появятся после подключения ИИ-модели.</p><span class="badge">Без генерации ответов</span></section>'+form('chat','Тема сообщения','Твоё сообщение')+records('chat');
     if(tab==='memory') html+='<p class="hint">Здесь ты управляешь сведениями, которые сможешь разрешить Тори использовать.</p>'+form('memory','Что запомнить','Подробности')+records('memory');
     if(tab==='knowledge') html+='<p class="hint">Локальные заметки. Поиск по смыслу и загрузка документов появятся позже.</p>'+form('knowledge','Название материала','Содержание и источник')+records('knowledge');
-    if(tab==='topic') html+=qwenPanel()+form('topic','Тема обучения','Что нужно изучить')+records('topic');
+    if(tab==='topic') html+=qwenPanel();
     content.innerHTML=html;
   }
   else if(page==='mobile') content.innerHTML='<section class="panel"><h2>Доступ с телефона</h2><span class="badge">В разработке</span><p>Интерфейс адаптируется к небольшому экрану. Сервер этой версии доступен только на компьютере, где он запущен. Сетевое подключение телефона и синхронизация пока не включены.</p></section>';
@@ -97,15 +159,21 @@ async function refreshQwenStatus(){
     const q=await api('qwen/status');
     state.qwen=q;state.qwen_connected=q.connected;
     const bridge=document.getElementById('bridge-status');
-    const bridgeHelp=document.getElementById('bridge-help');
     const learning=document.getElementById('learning-status');
     const owner=document.getElementById('owner-status');
     const memory=document.getElementById('memory-status');
+    const summary=document.getElementById('memory-summary');
+    const session=document.getElementById('session-card');
+    const queue=document.getElementById('queue-list');
+    const journal=document.getElementById('journal-list');
     if(bridge)bridge.textContent=q.connected?'Подключён':'Не подключён';
-    if(bridgeHelp)bridgeHelp.textContent=q.connected?'Связь с открытой вкладкой Qwen есть':'Открой Chrome Тори и вкладку Qwen';
-    if(learning)learning.textContent={observe:'Тори наблюдает',paused:'Обучение на паузе',stopped:'Обучение остановлено'}[q.mode]||q.mode;
-    if(owner)owner.textContent=q.owner==='tori'?'Диалог передан Тори':'Диалог у тебя';
-    if(memory)memory.textContent=`${q.memory_count||0} память · ${q.knowledge_count||0} знания`;
+    if(learning)learning.textContent={observe:'Наблюдает',paused:'Пауза',stopped:'Остановлено'}[q.mode]||q.mode;
+    if(owner)owner.textContent=q.owner==='tori'?'Управляет Тори':'Управляешь ты';
+    if(memory)memory.textContent=`${q.memory_count||0} · ${q.knowledge_count||0}`;
+    if(summary)summary.textContent=`${q.knowledge_count||0} знаний`;
+    if(session)session.innerHTML=qwenSessionMarkup(q);
+    if(queue)queue.innerHTML=qwenQueueMarkup(q);
+    if(journal)journal.innerHTML=qwenJournalMarkup(q);
   }catch(_error){}
 }
 setInterval(refreshQwenStatus,2000);
