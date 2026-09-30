@@ -174,13 +174,16 @@ function projectPanel(kind,title){
 }
 function chatMessages(c){
   const rows=c?.messages||[];
-  if(!rows.length)return '<div class="chat-empty"><strong>Тори готова к диалогу</strong><span>Напиши первое сообщение.</span></div>';
+  if(!rows.length)return '<div class="chat-empty"><strong>Дракончик Тоору готова к диалогу</strong><span>Напиши первое сообщение.</span></div>';
+  const tasks=state.dragon?.tasks||[];
   return rows.map(x=>{
     const role=x.role==='user'?'Ты':x.role==='tori'?'Дракончик Тоору':'Система';
     const side=x.role==='user'?'user':x.role==='tori'?'assistant':'system';
     const usage=(x.input_tokens||x.output_tokens)?`<span>${x.input_tokens||0} + ${x.output_tokens||0} ток.</span>`:'';
     const context=(x.context||[]).length?`<div class="context-used"><span>Использовано:</span>${x.context.map(item=>`<span class="context-chip">${item.kind==='memory'?'Память':'Знание'} · ${escapeHtml(item.title)}</span>`).join('')}</div>`:'';
-    return `<article class="chat-message ${side}"><div class="chat-author">${role}</div><div class="chat-bubble">${escapeHtml(x.text)}</div>${context}<div class="chat-meta">${escapeHtml(fmtDate(x.created_at))}${usage}</div></article>`;
+    const linked=tasks.find(t=>t.source_kind==='chat'&&Number(t.source_message_id)===Number(x.id));
+    const task=linked?`<button class="chat-linked-task ${linked.requires_decision?'needs-decision':''}" data-go="dragon" data-open-dragon-tab="tasks"><span>🐉</span><div><small>${linked.requires_decision?'Требуется решение':'Связано с задачей Дракончика'}</small><strong>${escapeHtml(linked.title)}</strong></div><em>Открыть →</em></button>`:'';
+    return `<article class="chat-message ${side}"><div class="chat-author">${role}</div><div class="chat-bubble">${escapeHtml(x.text)}</div>${context}${task}<div class="chat-meta">${escapeHtml(fmtDate(x.created_at))}${usage}</div></article>`;
   }).join('');
 }
 function usageStrip(usage,scope='all'){
@@ -403,8 +406,23 @@ function dragonPermissionsForm(){
 }
 function dragonNotificationsMarkup(d){
   const notes=d.notifications||[];
-  if(!notes.length)return '<div class="empty-state">Уведомлений пока нет.</div>';
-  return notes.slice(0,12).map(n=>'<article class="dragon-note '+(n.is_read?'is-read':'')+'"><span class="dragon-note-dot '+escapeHtml(n.level||'info')+'"></span><div><strong>'+escapeHtml(n.title)+'</strong><p>'+escapeHtml(n.body||'')+'</p><small>'+escapeHtml(fmtDate(n.created_at))+'</small></div></article>').join('');
+  const labels={important:'Важное',completed:'Завершено',error:'Ошибка',decision:'Требуется решение'};
+  const icons={important:'!',completed:'✓',error:'×',decision:'?'};
+  const counts=d.unread_notification_counts||{};
+  const summary='<div class="notification-categories">'+Object.keys(labels).map(key=>'<div class="notification-category is-'+key+'"><span>'+icons[key]+'</span><div><strong>'+String(counts[key]||0)+'</strong><small>'+labels[key]+'</small></div></div>').join('')+'</div>';
+  if(!notes.length)return summary+'<div class="empty-state">Уведомлений пока нет.</div>';
+  const groups=new Map();
+  notes.forEach(note=>{
+    const category=note.category||'important';
+    const key=category+'|'+(note.group_key||note.action||note.title);
+    if(!groups.has(key))groups.set(key,{latest:note,count:0,unread:0});
+    const group=groups.get(key);group.count++;if(!note.is_read)group.unread++;
+  });
+  const body=[...groups.values()].slice(0,16).map(group=>{
+    const n=group.latest,category=n.category||'important';
+    return '<article class="dragon-note category-'+escapeHtml(category)+' '+(group.unread?'':'is-read')+'"><span class="dragon-note-category">'+escapeHtml(icons[category]||'!')+'</span><div><div class="dragon-note-head"><small>'+escapeHtml(labels[category]||'Важное')+'</small>'+(group.count>1?'<em>'+group.count+' событий</em>':'')+'</div><strong>'+escapeHtml(n.title)+'</strong><p>'+escapeHtml(n.body||'')+'</p><small>'+escapeHtml(fmtDate(n.created_at))+'</small></div></article>';
+  }).join('');
+  return summary+'<div class="dragon-note-groups">'+body+'</div>';
 }
 function dragonActionsMarkup(d){
   const rows=d.actions||[];
@@ -416,10 +434,12 @@ function dragonTasksMarkup(d){
   if(!tasks.length)return '<div class="empty-state">Очередь задач пуста.</div>';
   const labels={pending:'В очереди',suggested:'Предложено',running:'Выполняется',done:'Готово',error:'Ошибка',cancelled:'Отменено'};
   return tasks.slice(0,30).map(t=>{
-    const controls=['pending','suggested','error'].includes(t.status)?'<button class="mini-action" data-dragon-task-action="run" data-dragon-task-id="'+t.id+'">Запустить</button>':'';
+    const controls=['pending','suggested','error'].includes(t.status)?'<button class="mini-action" data-dragon-task-action="run" data-dragon-task-id="'+t.id+'">'+(t.requires_decision?'Подтвердить и запустить':'Запустить')+'</button>':'';
     const cancel=['pending','suggested','running'].includes(t.status)?'<button class="mini-action" data-dragon-task-action="cancel" data-dragon-task-id="'+t.id+'">Отменить</button>':'';
     const detail=t.result?.error?'<small class="warning">'+escapeHtml(t.result.error)+'</small>':'';
-    return '<article class="dragon-task is-'+escapeHtml(t.status)+'"><span class="dragon-task-state"></span><div><strong>'+escapeHtml(t.title)+'</strong><small>'+escapeHtml(t.action_type)+' · '+escapeHtml(labels[t.status]||t.status)+'</small>'+detail+'</div><div class="dragon-task-actions">'+controls+cancel+'</div></article>';
+    const source=t.source_kind==='chat'?'<span class="dragon-task-source">Из чата</span>':t.source_kind==='brain'?'<span class="dragon-task-source">Из Мозга</span>':'';
+    const plan=(t.plan||[]).length?'<ol class="dragon-task-plan">'+t.plan.map(step=>'<li class="'+(step.status==='done'?'is-done':'')+'">'+escapeHtml(step.title||'')+'</li>').join('')+'</ol>':'';
+    return '<article class="dragon-task is-'+escapeHtml(t.status)+' '+(t.requires_decision?'needs-decision':'')+'"><span class="dragon-task-state"></span><div class="dragon-task-main"><div class="dragon-task-title"><strong>'+escapeHtml(t.title)+'</strong>'+source+(t.requires_decision?'<span class="decision-chip">Нужно решение</span>':'')+'</div><small>'+escapeHtml(t.action_type)+' · '+escapeHtml(t.requires_decision?'Требуется решение':(labels[t.status]||t.status))+'</small>'+plan+detail+'</div><div class="dragon-task-actions">'+controls+cancel+'</div></article>';
   }).join('');
 }
 function dragonSkillsMarkup(d){
@@ -436,10 +456,22 @@ function dragonActivityMarkup(d){
 }
 function dragonCurrentMarkup(d){
   const current=d.current;
-  if(current)return '<div id="dragon-current" class="dragon-current is-busy"><span class="pulse-dot"></span><div><strong>Сейчас выполняет</strong><p>'+escapeHtml(current.title)+'</p></div></div>';
+  if(current)return '<div id="dragon-current" class="dragon-current is-busy"><span class="pulse-dot"></span><div><small>Живой статус</small><strong>Сейчас выполняет</strong><p>'+escapeHtml(current.title)+'</p></div></div>';
+  const decision=(d.tasks||[]).find(t=>t.requires_decision&&['pending','suggested'].includes(t.status));
+  if(decision)return '<div id="dragon-current" class="dragon-current is-decision"><span class="pulse-dot decision"></span><div><small>Живой статус</small><strong>Ждёт твоего решения</strong><p>'+escapeHtml(decision.title)+'</p></div><button class="mini-action" data-dragon-tab="tasks">Посмотреть</button></div>';
   const waiting=(d.tasks||[]).find(t=>['pending','suggested'].includes(t.status));
-  if(waiting)return '<div id="dragon-current" class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Следующая задача</strong><p>'+escapeHtml(waiting.title)+'</p></div></div>';
-  return '<div id="dragon-current" class="dragon-current"><span class="pulse-dot idle"></span><div><strong>Сейчас свободна</strong><p>Ждёт новую задачу.</p></div></div>';
+  if(waiting)return '<div id="dragon-current" class="dragon-current"><span class="pulse-dot idle"></span><div><small>Живой статус</small><strong>Следующая задача</strong><p>'+escapeHtml(waiting.title)+'</p></div></div>';
+  return '<div id="dragon-current" class="dragon-current"><span class="pulse-dot idle"></span><div><small>Живой статус</small><strong>Сейчас свободна</strong><p>Наблюдает и ждёт новую задачу.</p></div></div>';
+}
+function dragonDiaryMarkup(d){
+  const days=d.diary||[];
+  if(!days.length)return '<div class="empty-state">Дневник пока пуст. Когда Тоору начнёт действовать, учиться и продвигать цели, записи появятся здесь.</div>';
+  const icons={action:'◆',learning:'◎',goal:'✦'};
+  const labels={action:'Действие',learning:'Обучение',goal:'Цель'};
+  return '<div class="dragon-diary">'+days.map(day=>'<section class="diary-day"><div class="diary-date"><span>'+escapeHtml(day.day)+'</span><small>'+day.events.length+' событий</small></div><div class="diary-events">'+day.events.map(e=>'<article class="diary-event kind-'+escapeHtml(e.kind)+'"><span class="diary-icon">'+(icons[e.kind]||'•')+'</span><div><small>'+escapeHtml(labels[e.kind]||e.kind)+'</small><strong>'+escapeHtml(e.title)+'</strong>'+(e.detail?'<p>'+escapeHtml(e.detail)+'</p>':'')+'<time>'+escapeHtml(fmtDate(e.created_at))+'</time></div></article>').join('')+'</div></section>').join('')+'</div>';
+}
+function dragonDiaryPanel(d){
+  return '<section class="dragon-diary-hero"><div><span class="eyebrow">История развития</span><h2>Дневник Дракончика</h2><p>Что Тоору делала, чему училась и какие цели продвигала — по дням.</p></div><span class="diary-orb">◉</span></section><section class="panel">'+dragonDiaryMarkup(d)+'</section>';
 }
 function dragonModeControl(d){
   const names={observe:'Наблюдать',suggest:'Предлагать',execute:'Выполнять'};
@@ -452,11 +484,13 @@ function dragonFileList(files){
 function dragonOverview(d,q){
   const enabled=Object.values(d.permissions||{}).filter(Boolean).length,total=Object.keys(d.permissions||{}).length;
   const auto=q.automation?.enabled,queued=(d.tasks||[]).filter(t=>['pending','suggested','running'].includes(t.status)).length;
-  return '<section class="dragon-hero"><div class="dragon-emblem" aria-hidden="true">🐉</div><div class="dragon-hero-copy"><span class="eyebrow">Центр действий</span><h2>'+escapeHtml(d.name||'Дракончик Тоору')+'</h2><p>Состояние, активность и быстрые команды без перегруженной страницы.</p><div class="dragon-badges"><span class="status-label ok">'+enabled+' / '+total+' прав</span><span class="status-label '+(auto?'ok':'')+'">Мозг: '+(auto?'авто':'ручной')+'</span><span class="status-label">'+queued+' задач</span><span class="status-label">'+(d.unread_notifications||0)+' новых</span></div></div><button class="dragon-voice-button" data-dragon-speak title="Озвучить состояние">🔊</button></section>'+
+  const counts=d.unread_notification_counts||{};
+  return '<section class="dragon-hero observable"><div class="dragon-emblem" aria-hidden="true">🐉</div><div class="dragon-hero-copy"><span class="eyebrow">Живой помощник</span><h2>'+escapeHtml(d.name||'Дракончик Тоору')+'</h2><p>Наблюдай, как она думает, получает поручения, выполняет задачи и учится.</p><div class="dragon-badges"><span class="status-label ok">'+enabled+' / '+total+' прав</span><span class="status-label '+(auto?'ok':'')+'">Мозг: '+(auto?'авто':'ручной')+'</span><span class="status-label">'+queued+' задач</span></div></div><div class="dragon-observer-orb"><i></i><span>'+(d.current?'РАБОТАЕТ':counts.decision?'ЖДЁТ ТЕБЯ':'НАБЛЮДАЕТ')+'</span></div><button class="dragon-voice-button" data-dragon-speak title="Озвучить состояние">🔊</button></section>'+
   dragonCurrentMarkup(d)+
-  '<div class="dragon-quick-grid"><button class="dragon-quick primary-card" data-go="ai" data-open-tab="brain"><span>✦</span><strong>Открыть Мозг</strong><small>Разум, цели и обучение</small></button><button class="dragon-quick" data-dragon-tab="tasks"><span>✓</span><strong>Задачи</strong><small>Очередь и режим работы</small></button><button class="dragon-quick" data-dragon-tab="project"><span>▤</span><strong>Проект</strong><small>Проводник и файлы</small></button><button class="dragon-quick" data-hard-reload><span>↻</span><strong>Обновить интерфейс</strong><small>Без кеша браузера</small></button></div>'+
-  '<div class="dragon-center-grid"><section class="panel"><div class="section-head"><div><span class="eyebrow">Активность</span><h2>14 дней</h2></div></div>'+dragonActivityMarkup(d)+'</section><section class="panel"><div class="section-head"><div><span class="eyebrow">Навыки</span><h2>Что умеет</h2></div></div><div class="dragon-skills">'+dragonSkillsMarkup(d)+'</div></section></div>'+
-  '<div class="dragon-center-grid"><section class="panel"><div class="section-head"><div><span class="eyebrow">События</span><h2>Уведомления</h2></div><button class="mini-action" data-dragon-read-all>Прочитано</button></div><div id="dragon-notifications">'+dragonNotificationsMarkup(d)+'</div></section><section class="panel"><div class="section-head"><div><span class="eyebrow">Лента</span><h2>Что Тоору делала</h2></div></div><div id="dragon-actions">'+dragonActionsMarkup(d)+'</div></section></div>';
+  '<div class="dragon-event-strip"><button data-dragon-tab="overview" class="event-stat important"><span>!</span><strong>'+String(counts.important||0)+'</strong><small>Важное</small></button><button data-dragon-tab="overview" class="event-stat completed"><span>✓</span><strong>'+String(counts.completed||0)+'</strong><small>Завершено</small></button><button data-dragon-tab="overview" class="event-stat error"><span>×</span><strong>'+String(counts.error||0)+'</strong><small>Ошибки</small></button><button data-dragon-tab="tasks" class="event-stat decision"><span>?</span><strong>'+String(counts.decision||0)+'</strong><small>Нужно решение</small></button></div>'+
+  '<div class="dragon-quick-grid"><button class="dragon-quick primary-card" data-go="ai" data-open-tab="chat"><span>✦</span><strong>Поговорить</strong><small>поручение можно создать прямо в чате</small></button><button class="dragon-quick" data-dragon-tab="tasks"><span>✓</span><strong>Задачи</strong><small>планы, очередь и решения</small></button><button class="dragon-quick" data-dragon-tab="diary"><span>◉</span><strong>Дневник</strong><small>наблюдать развитие по дням</small></button><button class="dragon-quick" data-dragon-tab="project"><span>▤</span><strong>Проект</strong><small>проводник и файлы</small></button></div>'+
+  '<div class="dragon-center-grid"><section class="panel"><div class="section-head"><div><span class="eyebrow">События</span><h2>Умные уведомления</h2></div><button class="mini-action" data-dragon-read-all>Всё прочитано</button></div><div id="dragon-notifications">'+dragonNotificationsMarkup(d)+'</div></section><section class="panel"><div class="section-head"><div><span class="eyebrow">Активность</span><h2>14 дней</h2></div><button class="mini-action" data-dragon-tab="diary">Открыть дневник</button></div>'+dragonActivityMarkup(d)+'</section></div>'+
+  '<section class="panel"><div class="section-head"><div><span class="eyebrow">Лента</span><h2>Что Тоору делала</h2></div></div><div id="dragon-actions">'+dragonActionsMarkup(d)+'</div></section>';
 }
 function dragonTasksPanel(d){
   const queued=(d.tasks||[]).filter(t=>['pending','suggested','running'].includes(t.status)).length;
@@ -472,10 +506,10 @@ function dragonRightsPanel(d){
 function dragonPanel(){
   const d=state.dragon||{name:'Дракончик Тоору',permissions:{},actions:[],notifications:[],tasks:[],skills:[],activity:[],unread_notifications:0,mode:'suggest'};
   const q=state.learning||{};
-  const tabs={overview:'Обзор',tasks:'Задачи',project:'Проект',rights:'Права'};
+  const tabs={overview:'Обзор',tasks:'Задачи',diary:'Дневник',project:'Проект',rights:'Права'};
   if(!tabs[dragonTab])dragonTab='overview';
   const nav='<div class="dragon-subtabs">'+Object.entries(tabs).map(([key,label])=>'<button class="'+(dragonTab===key?'is-active':'')+'" data-dragon-tab="'+key+'">'+label+'</button>').join('')+'</div>';
-  const body=dragonTab==='overview'?dragonOverview(d,q):dragonTab==='tasks'?dragonTasksPanel(d):dragonTab==='project'?dragonProjectPanel():dragonRightsPanel(d);
+  const body=dragonTab==='overview'?dragonOverview(d,q):dragonTab==='tasks'?dragonTasksPanel(d):dragonTab==='diary'?dragonDiaryPanel(d):dragonTab==='project'?dragonProjectPanel():dragonRightsPanel(d);
   return nav+body;
 }
 function ensureDragonToastHost(){
@@ -488,9 +522,10 @@ function showDragonToast(note){
   if(shownDragonNotes.has(note.id)||host.querySelector('[data-dragon-note="'+note.id+'"]'))return;
   shownDragonNotes.add(note.id);
   const el=document.createElement('div');
-  el.className='dragon-toast level-'+escapeHtml(note.level||'info');
+  el.className='dragon-toast level-'+escapeHtml(note.level||'info')+' category-'+escapeHtml(note.category||'important');
   el.dataset.dragonNote=String(note.id);
-  el.innerHTML='<div><strong>'+escapeHtml(note.title)+'</strong>'+(note.body?'<p>'+escapeHtml(note.body)+'</p>':'')+'</div><button aria-label="Закрыть">×</button>';
+  const label={important:'Важное',completed:'Завершено',error:'Ошибка',decision:'Требуется решение'}[note.category||'important']||'Важное';
+  el.innerHTML='<div><small>'+escapeHtml(label)+'</small><strong>'+escapeHtml(note.title)+'</strong>'+(note.body?'<p>'+escapeHtml(note.body)+'</p>':'')+'</div><button aria-label="Закрыть">×</button>';
   el.querySelector('button').addEventListener('click',async()=>{try{await api('dragon/notifications/read',{ids:[note.id]})}catch(_e){}el.remove()});
   host.appendChild(el);
   setTimeout(()=>{if(el.isConnected)el.remove()},12000);
@@ -509,6 +544,7 @@ async function refreshDragonNotifications(){
       const notes=document.getElementById('dragon-notifications');if(notes)notes.innerHTML=dragonNotificationsMarkup(d);
       const actions=document.getElementById('dragon-actions');if(actions)actions.innerHTML=dragonActionsMarkup(d);
       const tasks=document.getElementById('dragon-tasks');if(tasks)tasks.innerHTML=dragonTasksMarkup(d);
+      const diary=document.querySelector('.dragon-diary');if(diary)diary.outerHTML=dragonDiaryMarkup(d);
     }
   }catch(_error){}
 }
@@ -552,7 +588,7 @@ document.querySelector('nav').addEventListener('click',event=>{const b=event.tar
 content.addEventListener('click',async event=>{
   const b=event.target.closest('button');if(!b)return;
   if(b.closest('form')&&b.type==='submit')return;
-  if(b.dataset.go){if(b.dataset.openTab)tab=b.dataset.openTab;go(b.dataset.go);return}
+  if(b.dataset.go){if(b.dataset.openTab)tab=b.dataset.openTab;if(b.dataset.openDragonTab)dragonTab=b.dataset.openDragonTab;go(b.dataset.go);return}
   if(b.dataset.tab){tab=b.dataset.tab;render();return}
   if(b.dataset.dragonTab){dragonTab=b.dataset.dragonTab;render();return}
   if(b.dataset.settingsTab){settingsTab=b.dataset.settingsTab;render();return}
