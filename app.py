@@ -159,6 +159,7 @@ class Storage:
                     confidence_after REAL NOT NULL DEFAULT 0,
                     lesson TEXT NOT NULL DEFAULT '',
                     reasoning_id INTEGER,
+                    auto_allowed INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL DEFAULT 'planned',
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -399,6 +400,11 @@ class Storage:
                     CREATE INDEX IF NOT EXISTS brain_experiments_status_id
                         ON brain_experiments(status, id DESC);
                 """)
+                experiment_columns = {row['name'] for row in db.execute(
+                    'PRAGMA table_info(brain_experiments)'
+                ).fetchall()}
+                if 'auto_allowed' not in experiment_columns:
+                    db.execute("ALTER TABLE brain_experiments ADD COLUMN auto_allowed INTEGER NOT NULL DEFAULT 0")
                 db.execute('PRAGMA user_version=12')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
@@ -795,7 +801,7 @@ class Storage:
         with self.connect() as db:
             return [dict(row) for row in db.execute(
                 'SELECT id,hypothesis,experiment_type,plan,expected_result,actual_result,verdict,'
-                'confidence_before,confidence_after,lesson,reasoning_id,status,created_at,updated_at '
+                'confidence_before,confidence_after,lesson,reasoning_id,auto_allowed,status,created_at,updated_at '
                 'FROM brain_experiments ORDER BY id DESC LIMIT ?',
                 (max(1, min(int(limit), 100)),)
             )]
@@ -806,6 +812,7 @@ class Storage:
         plan = item.get('plan', '')
         expected = item.get('expected_result', '')
         reasoning_id = item.get('reasoning_id')
+        auto_allowed = item.get('auto_allowed') is True
         try:
             confidence = max(0.0, min(float(item.get('confidence_before', 0.5)), 1.0))
         except (TypeError, ValueError):
@@ -828,10 +835,10 @@ class Storage:
                 return {'id': duplicate['id'], 'status': 'planned', 'duplicate': True}
             cursor = db.execute(
                 'INSERT INTO brain_experiments('
-                'hypothesis,experiment_type,plan,expected_result,confidence_before,reasoning_id'
-                ') VALUES (?,?,?,?,?,?)',
+                'hypothesis,experiment_type,plan,expected_result,confidence_before,reasoning_id,auto_allowed'
+                ') VALUES (?,?,?,?,?,?,?)',
                 (hypothesis.strip()[:3000], experiment_type, plan.strip()[:4000],
-                 expected.strip()[:3000], confidence, reasoning_id)
+                 expected.strip()[:3000], confidence, reasoning_id, 1 if auto_allowed else 0)
             )
             experiment_id = cursor.lastrowid
         self.dragon_log_action(
@@ -1029,7 +1036,7 @@ class Storage:
             if running:
                 return None
             row = db.execute(
-                "SELECT id FROM brain_experiments WHERE status='planned' ORDER BY id LIMIT 1"
+                "SELECT id FROM brain_experiments WHERE status='planned' AND auto_allowed=1 ORDER BY id LIMIT 1"
             ).fetchone()
             if not row:
                 return None
@@ -1254,6 +1261,7 @@ class Storage:
                 'expected_result': expected,
                 'confidence_before': normalized.get('confidence', 0),
                 'reasoning_id': reasoning_id,
+                'auto_allowed': True,
             })
             experiment_id = created.get('id')
         self.save_work_context({
