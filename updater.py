@@ -264,6 +264,19 @@ def apply_source(root: Path, source_root: Path, revision: str) -> Path:
     return backup
 
 
+def local_app_running(root: Path) -> bool:
+    state = read_json(root / "data" / "server.json", {})
+    port = state.get("port") if isinstance(state, dict) else None
+    if type(port) is not int or not 1 <= port <= 65535:
+        return False
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as response:
+            health = json.load(response)
+        return isinstance(health, dict) and health.get("app") == "TOORU-DRAGON"
+    except (OSError, ValueError, urllib.error.URLError):
+        return False
+
+
 def wait_for_pid(pid: int, timeout: float = 60.0) -> None:
     if pid <= 0:
         return
@@ -343,6 +356,8 @@ def main(argv=None) -> int:
             return 0
         if not args.apply:
             parser.error("укажите --check или --apply")
+        if not args.wait_pid and local_app_running(root):
+            raise RuntimeError("TOORU сейчас запущена. Закройте программу или обновляйте через раздел «Система обновления».")
         wait_for_pid(args.wait_pid)
         perform_update(root, args.expected_revision)
         if args.restart:
