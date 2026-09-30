@@ -410,7 +410,7 @@ function dragonPanel(){
   '</div>'+
   '<div class="dragon-center-grid">'+
     '<section class="panel"><div class="section-head"><div><span class="eyebrow">Очередь</span><h2>Задачи Дракончика</h2></div><span class="status-label">'+queued+'</span></div>'+
-      '<form id="dragon-task-form" class="clean-form"><input name="title" maxlength="300" placeholder="Что поручить Дракончику?" required><select name="action_type"><option value="note">Заметка / задача</option><option value="project_scan">Проверить проект</option><option value="database_backup">Резервная копия</option><option value="update_check">Проверить обновление</option><option value="file_read">Прочитать файл</option></select><input name="path" maxlength="500" placeholder="Путь к файлу — если нужен"><div class="form-actions"><button class="primary">Добавить задачу</button><button type="button" class="action" data-dragon-mic>🎙 Голосом</button></div></form>'+
+      '<form id="dragon-task-form" class="clean-form"><input name="title" maxlength="300" placeholder="Что поручить Дракончику?" required><select name="action_type"><option value="note">Заметка / задача</option><option value="project_scan">Проверить проект</option><option value="database_backup">Резервная копия</option><option value="update_check">Проверить обновление</option><option value="file_read">Прочитать файл</option><option value="file_write">Изменить файл</option></select><input name="path" maxlength="500" placeholder="Путь к файлу — если нужен"><textarea name="content" maxlength="60000" rows="3" placeholder="Новое содержимое — только для изменения файла"></textarea><div class="form-actions"><button class="primary">Добавить задачу</button><button type="button" class="action" data-dragon-mic>🎙 Голосом</button></div></form>'+
       '<div id="dragon-tasks">'+dragonTasksMarkup(d)+'</div></section>'+
     '<section class="panel"><div class="section-head"><div><span class="eyebrow">Навыки</span><h2>Что умеет</h2></div></div><div class="dragon-skills">'+dragonSkillsMarkup(d)+'</div></section>'+
   '</div>'+
@@ -528,7 +528,7 @@ content.addEventListener('submit',async event=>{
     if(f.id==='profile-form')await api('settings',{name:values.name,theme:state.settings.theme});
     if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
-    if(f.id==='dragon-task-form')await api('dragon/task',{title:values.title,action_type:values.action_type,payload:values.path?{path:values.path}:{}});
+    if(f.id==='dragon-task-form')await api('dragon/task',{title:values.title,action_type:values.action_type,payload:{...(values.path?{path:values.path}:{}),...(values.content?{content:values.content}:{})}});
     if(f.id==='dragon-permissions-form')await api('dragon/permissions',{
       project_read:values.project_read==='1',
       project_write:values.project_write==='1',
