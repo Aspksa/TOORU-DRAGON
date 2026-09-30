@@ -94,7 +94,7 @@ function recordList(kind,emptyText){
 function libraryPanel(kind,title,description,titleLabel,bodyLabel){
   return `<div class="library-layout">
     <section class="panel library-intro"><span class="eyebrow">${kind==='memory'?'Личное':'База'}</span><h2>${title}</h2><p>${description}</p><strong class="big-count">${state.counts[kind]||0}</strong><span class="meta">записей</span></section>
-    <form id="record-form" data-kind="${kind}" class="panel clean-form">
+    <form id="record-form-${kind}" data-kind="${kind}" class="panel clean-form">
       <h2>Добавить</h2>
       <label for="record-title">${titleLabel}</label><input id="record-title" name="title" maxlength="300" required>
       <label for="record-body">${bodyLabel}</label><textarea id="record-body" name="body" maxlength="20000"></textarea>
@@ -279,13 +279,56 @@ function learningPanel(){
     <section class="panel compact-panel"><div class="section-head"><div><span class="eyebrow">Очередь</span><h2>План обучения</h2></div></div><div id="queue-list">${learningQueueMarkup(q)}</div></section>
   </div>${brainSuggestionsMarkup(q.suggestions)}`;
 }
+function brainCenterPanel(){
+  const q=state.learning||{mode:'stopped',configured:false,queue:[],messages:[],automation:{}};
+  const r=state.reasoning||{configured:false,items:[],usage:{}};
+  const goals=state.chat?.goals||[];
+  const active=(q.queue||[]).filter(x=>['pending','running'].includes(x.status)).length;
+  const auto=!!q.automation?.enabled;
+  return `<section class="learning-shell">
+    <div class="learning-hero"><div><span class="eyebrow">Мозг Тори</span><h2>Разум + цели + самообучение</h2><p>Один цикл: понять цель → найти нехватку знаний → изучить → проверить → обновить план.</p></div><span class="model-pill">Qwen3.6 35B</span></div>
+    <div class="learning-statusbar compact-status">
+      <div class="status-chip"><i class="status-dot ${auto?'is-on':'is-off'}"></i><span>Авторазвитие</span><strong>${auto?'Включено':'Выключено'}</strong></div>
+      <div class="status-chip"><i class="status-dot ${q.last_success>0?'is-on':'is-warn'}"></i><span>AI</span><strong>${q.last_success>0?'Подключён':'Готовность не проверена'}</strong></div>
+      <div class="status-chip"><i class="status-dot is-idle"></i><span>В работе</span><strong>${active}</strong></div>
+      <div class="status-chip"><i class="status-dot is-on"></i><span>Цели</span><strong>${goals.length}</strong></div>
+    </div>
+    ${usageStrip(q.usage,'all')}
+    <form id="brain-automation-form" class="panel clean-form">
+      <label class="context-toggle"><input type="checkbox" name="enabled" value="1" ${auto?'checked':''}> <strong>Авторазвитие Тори</strong> — самой продолжать обучение и переоценивать цели</label>
+      <details><summary>Дополнительно</summary><div class="budget-fields">
+        <label>Уверенность<input name="min_confidence" type="number" min="0.50" max="0.95" step="0.05" value="${q.automation?.min_confidence??0.75}"></label>
+        <label>Задач в день<input name="daily_limit" type="number" min="1" max="20" value="${q.automation?.daily_limit??5}"></label>
+        <label>Глубина темы<input name="chain_limit" type="number" min="1" max="6" value="${q.automation?.chain_limit??3}"></label>
+      </div></details>
+      <button class="primary">Сохранить</button>
+    </form>
+  </section>
+  ${brainGoalsMarkup(goals)}
+  <section class="panel clean-form"><span class="eyebrow">Разум v2</span><h2>Разобрать задачу</h2>
+    <form id="reasoning-form"><textarea name="problem" maxlength="12000" rows="3" placeholder="Что Тори должна обдумать?" required></textarea>
+    <label class="context-toggle"><input type="checkbox" name="use_context" value="1" checked> Память и знания</label><button class="primary">Обдумать</button></form>
+  </section>
+  <details class="panel"><summary><strong>Последние логические разборы</strong></summary>${reasoningItemsMarkup(r)}</details>
+  <details class="panel"><summary><strong>Обучение и очередь</strong> · ${active} активных</summary>
+    <form id="learning-queue-form" class="clean-form"><input name="topic" maxlength="300" placeholder="Тема" required><textarea name="question" maxlength="8000" placeholder="Вопрос для Qwen" required></textarea><button class="action">Добавить вручную</button></form>
+    <div id="queue-list">${learningQueueMarkup(q)}</div>
+  </details>
+  ${brainSuggestionsMarkup(q.suggestions)}`;
+}
+function dataPanel(){
+  return '<div class="learning-columns">'+
+    '<div>'+libraryPanel('memory','Память','Личные факты и предпочтения.','Что запомнить','Подробности')+'</div>'+
+    '<div>'+libraryPanel('knowledge','Знания','Материалы Тори и результаты обучения.','Название','Содержание')+'</div>'+
+  '</div>';
+}
 function mainPanel(){
   const learning=state.learning||{};
   return `<section class="welcome"><span class="eyebrow">TOORU · DRAGON</span><h2>Добро пожаловать, ${escapeHtml(state.settings.name)}</h2><p>Один центр для общения, памяти, проектов и обучения Тори.</p></section>
   <div class="dashboard-grid">
     <button class="dashboard-card primary-card" data-go="ai" data-open-tab="chat"><span>✦</span><strong>Поговорить с Тори</strong><small>${state.ai_connected?'AI подключён':'Настрой AI Studio'}</small></button>
-    <button class="dashboard-card" data-go="ai" data-open-tab="topic"><span>◎</span><strong>Обучение</strong><small>${{running:'Работает',paused:'Пауза',stopped:'Остановлено'}[learning.mode]||'Остановлено'} · ${(learning.queue||[]).filter(x=>['pending','running'].includes(x.status)).length} в очереди</small></button>
-    <button class="dashboard-card" data-go="ai" data-open-tab="memory"><span>◈</span><strong>Память и знания</strong><small>${state.counts.memory||0} память · ${state.counts.knowledge||0} знания</small></button>
+    <button class="dashboard-card" data-go="ai" data-open-tab="brain"><span>◎</span><strong>Мозг Тори</strong><small>${{running:'Работает',paused:'Пауза',stopped:'Остановлено'}[learning.mode]||'Остановлено'} · ${(learning.queue||[]).filter(x=>['pending','running'].includes(x.status)).length} в очереди</small></button>
+    <button class="dashboard-card" data-go="ai" data-open-tab="data"><span>◈</span><strong>Память и знания</strong><small>${state.counts.memory||0} память · ${state.counts.knowledge||0} знания</small></button>
     <button class="dashboard-card" data-go="work"><span>▣</span><strong>Проекты</strong><small>${(state.counts.work||0)+(state.counts.home||0)} всего</small></button>
   </div>`;
 }
@@ -300,16 +343,14 @@ function render(){
   else if(page==='work')content.innerHTML=projectPanel('work','Рабочие проекты');
   else if(page==='home')content.innerHTML=projectPanel('home','Домашние проекты');
   else if(page==='ai'){
-    const tabs={chat:'Чат',reasoning:'Разум',memory:'Память',knowledge:'Знания',topic:'Обучение'};
+    const tabs={chat:'Чат',brain:'Мозг',data:'Данные'};
+    if(!tabs[tab])tab='chat';
     let html='<div class="tabs" role="tablist" aria-label="Разделы Tooru/Ai">'+Object.entries(tabs).map(([key,value])=>`<button class="tab" role="tab" aria-selected="${tab===key}" data-tab="${key}">${value}</button>`).join('')+'</div>';
     if(tab==='chat')html+=chatPanel();
-    if(tab==='reasoning')html+=reasoningPanel();
-    if(tab==='memory')html+=libraryPanel('memory','Память Тори','Факты и предпочтения, которые ты сохраняешь вручную. Они пока не отправляются модели автоматически.','Что запомнить','Подробности');
-    if(tab==='knowledge')html+=libraryPanel('knowledge','Знания','Материалы, полученные во время обучения и добавленные вручную.','Название','Содержание');
-    if(tab==='topic')html+=learningPanel();
+    if(tab==='brain')html+=brainCenterPanel();
+    if(tab==='data')html+=dataPanel();
     content.innerHTML=html;
     if(tab==='chat')scrollChat('chat-stream');
-    if(tab==='topic')scrollChat('learning-chat-stream');
   }else if(page==='mobile')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">Позже</span><h2>Мобильное приложение</h2><p>Интерфейс уже адаптивный, но удалённое подключение пока отключено ради безопасности.</p></section>';
   else if(page==='updates')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">GitHub → локально</span><h2>Система обновления</h2><p>Проверяет ветку main, сохраняет данные и переносимый Python, создаёт резервные копии и перезапускает TOORU после установки.</p><div class="form-actions"><button class="action" data-update-check>Проверить обновление</button><button class="primary" data-update-start>Обновить и перезапустить</button><button class="action" data-backup>Создать копию базы</button></div><div id="update-result" aria-live="polite"></div></section>';
   else if(page==='diagnostics')content.innerHTML='<section class="panel simple-state"><span class="eyebrow">Система</span><h2>Диагностика</h2><p>Проверка базы, Python, SQLite и подключения AI.</p><button class="primary" data-diagnose>Запустить проверку</button><div id="diagnostic-result" aria-live="polite"></div></section>';
@@ -340,7 +381,7 @@ content.addEventListener('submit',async event=>{
   event.preventDefault();const f=event.target,b=f.querySelector('button[type="submit"],button:not([type])');if(b)b.disabled=true;
   try{
     const values=Object.fromEntries(new FormData(f));
-    if(f.id==='record-form')await api('records',{...values,kind:f.dataset.kind});
+    if(f.id.startsWith('record-form'))await api('records',{...values,kind:f.dataset.kind});
     if(f.id==='profile-form')await api('settings',{name:values.name,theme:state.settings.theme});
     if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
@@ -354,7 +395,7 @@ content.addEventListener('submit',async event=>{
   }catch(error){message(error.message)}finally{if(b)b.disabled=false}
 });
 async function refreshLearningStatus(){
-  if(page!=='ai'||tab!=='topic'||!state)return;
+  if(page!=='ai'||tab!=='brain'||!state)return;
   try{
     const q=await api('learning/status');state.learning=q;
     const learning=document.getElementById('learning-status'),queueStatus=document.getElementById('queue-status'),memory=document.getElementById('memory-status'),queue=document.getElementById('queue-list'),stream=document.getElementById('learning-chat-stream'),usage=document.getElementById('learning-usage');
