@@ -165,7 +165,7 @@ function usageStrip(usage,scope='all'){
     <div><span>${label}</span><strong>${Number(first.cost_rub||0).toFixed(2)} ₽</strong></div>
     <div><span>${scope==='all'?'Месяц':'Всего AI за месяц'}</span><strong>${(scope==='all'?spent:totalSpent).toFixed(2)} ₽${limit>0?' / '+limit.toFixed(0)+' ₽':''}</strong></div>
     <div><span>Токены ${scope==='all'?'':'раздела'}</span><strong>${Number(scoped.input_tokens||0)+Number(scoped.output_tokens||0)}</strong></div>
-    ${limit>0?`<div class="usage-progress"><i style="width:${pct}%"></i></div>`:''}
+    ${limit>0?`<div class="usage-progress"><progress max="100" value="${pct}" aria-label="Использование лимита"></progress></div>`:''}
   </div>`;
 }
 function brainSuggestionsMarkup(items){
@@ -398,8 +398,8 @@ function dragonActivityMarkup(d){
   const rows=d.activity||[];
   const max=Math.max(1,...rows.map(x=>Number(x.count)||0));
   return '<div class="dragon-activity">'+rows.map(x=>{
-    const height=Math.max(5,Math.round((Number(x.count)||0)/max*100));
-    return '<div class="dragon-day" title="'+escapeHtml(x.day)+' · '+String(x.count)+'"><i style="height:'+height+'%"></i><small>'+escapeHtml(x.day.slice(8))+'</small></div>';
+    const level=Math.max(0,Math.min(10,Math.ceil((Number(x.count)||0)/max*10)));
+    return '<div class="dragon-day" title="'+escapeHtml(x.day)+' · '+String(x.count)+'"><i class="level-'+level+'"></i><small>'+escapeHtml(x.day.slice(8))+'</small></div>';
   }).join('')+'</div>';
 }
 function dragonCurrentMarkup(d){
