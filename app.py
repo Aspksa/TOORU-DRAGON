@@ -864,7 +864,8 @@ class Storage:
             )
             settings = dict(db.execute(
                 "SELECT key,value FROM settings WHERE key IN "
-                "('learning_mode','ai_folder_id','ai_model','ai_last_success','ai_auth_type','secret.yandex_api_key')"
+                "('learning_mode','ai_folder_id','ai_model','ai_last_success','ai_auth_type','secret.yandex_api_key',"
+                "'brain_auto_learning','brain_auto_min_confidence','brain_auto_daily_limit','brain_auto_day','brain_auto_count')"
             ).fetchall())
             queue = [dict(row) for row in db.execute(
                 'SELECT id,topic,question,status,attempts,substr(response_text,1,1200) AS response_text,'
@@ -898,7 +899,112 @@ class Storage:
             'stale_seconds': STALE_SECONDS,
             'usage': self.usage_summary(),
             'suggestions': self.brain_suggestions('pending', 20),
+            'automation': {
+                'enabled': settings.get('brain_auto_learning', '0') == '1',
+                'min_confidence': float(settings.get('brain_auto_min_confidence', '0.75') or 0.75),
+                'daily_limit': int(settings.get('brain_auto_daily_limit', '5') or 5),
+                'today_count': (
+                    int(settings.get('brain_auto_count', '0') or 0)
+                    if settings.get('brain_auto_day', '') == time.strftime('%Y-%m-%d', time.gmtime())
+                    else 0
+                ),
+            },
         }
+
+    def brain_automation_config(self, item):
+        enabled = item.get('enabled')
+        if type(enabled) is not bool:
+            raise ValueError('Укажите, включать ли автоматическое самообучение.')
+        try:
+            min_confidence = float(item.get('min_confidence', 0.75))
+            daily_limit = int(item.get('daily_limit', 5))
+        except (TypeError, ValueError):
+            raise ValueError('Некорректные параметры самообучения.') from None
+        if not 0.5 <= min_confidence <= 0.95:
+            raise ValueError('Порог уверенности должен быть от 0.50 до 0.95.')
+        if not 1 <= daily_limit <= 20:
+            raise ValueError('Дневной лимит должен быть от 1 до 20 задач.')
+        with self.connect() as db:
+            db.executemany(
+                'INSERT OR REPLACE INTO settings VALUES (?,?)',
+                [
+                    ('brain_auto_learning', '1' if enabled else '0'),
+                    ('brain_auto_min_confidence', str(min_confidence)),
+                    ('brain_auto_daily_limit', str(daily_limit)),
+                ]
+            )
+        return self.learning_state()
+
+    def promote_autonomous_learning(self):
+        if self.enforce_learning_budget()['blocked']:
+            return None
+        today = time.strftime('%Y-%m-%d', time.gmtime())
+        with self.connect() as db:
+            settings = dict(db.execute(
+                "SELECT key,value FROM settings WHERE key IN "
+                "('learning_mode','brain_auto_learning','brain_auto_min_confidence',"
+                "'brain_auto_daily_limit','brain_auto_day','brain_auto_count')"
+            ).fetchall())
+            if settings.get('learning_mode') != 'running' or settings.get('brain_auto_learning') != '1':
+                return None
+            try:
+                threshold = max(0.5, min(float(settings.get('brain_auto_min_confidence', '0.75')), 0.95))
+                daily_limit = max(1, min(int(settings.get('brain_auto_daily_limit', '5')), 20))
+            except (TypeError, ValueError):
+                threshold, daily_limit = 0.75, 5
+            count = int(settings.get('brain_auto_count', '0') or 0) if settings.get('brain_auto_day') == today else 0
+            if count >= daily_limit:
+                return None
+            active = db.execute(
+                "SELECT count(*) FROM learning_queue WHERE status IN ('pending','running')"
+            ).fetchone()[0]
+            if active >= 2:
+                return None
+            row = db.execute(
+                "SELECT id,topic,question,reason,confidence FROM brain_suggestions "
+                "WHERE status='pending' AND kind='learning' AND confidence>=? "
+                "ORDER BY confidence DESC,id ASC LIMIT 1",
+                (threshold,)
+            ).fetchone()
+            if not row:
+                return None
+            duplicate = db.execute(
+                "SELECT id FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
+                "AND status IN ('pending','running','done') LIMIT 1",
+                (row['topic'], row['question'])
+            ).fetchone()
+            if duplicate:
+                db.execute(
+                    "UPDATE brain_suggestions SET status='accepted',"
+                    "decided_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (row['id'],)
+                )
+                return None
+            cursor = db.execute(
+                'INSERT INTO learning_queue(topic,question) VALUES (?,?)',
+                (row['topic'], row['question'])
+            )
+            queue_id = cursor.lastrowid
+            db.execute(
+                "UPDATE brain_suggestions SET status='accepted',"
+                "decided_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (row['id'],)
+            )
+            db.executemany(
+                'INSERT OR REPLACE INTO settings VALUES (?,?)',
+                [('brain_auto_day', today), ('brain_auto_count', str(count + 1))]
+            )
+        self.add_ai_message(
+            'learning', 'tori',
+            'Самообучение: ' + row['question'],
+            queue_id=queue_id
+        )
+        self.add_ai_message(
+            'brain', 'system',
+            'Автоматически отправлена в обучение тема «' + row['topic'] + '» '
+            f'(уверенность {float(row["confidence"]):.0%}).'
+        )
+        return {'id': queue_id, 'suggestion_id': row['id']}
 
     def learning_control(self, action):
         modes = {'start': 'running', 'pause': 'paused', 'stop': 'stopped'}
@@ -1258,6 +1364,10 @@ class LearningWorker(threading.Thread):
 
     def run(self):
         while not self.stopping.wait(1.5):
+            try:
+                self.storage.promote_autonomous_learning()
+            except Exception as exc:
+                logging.warning('Brain automation cycle failed: %s', exc)
             item = self.storage.claim_learning()
             if not item:
                 continue
@@ -1413,6 +1523,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.chat_send(item))
                 elif self.path == '/api/brain/action':
                     self.send(200, storage.decide_brain_suggestion(item))
+                elif self.path == '/api/brain/automation':
+                    self.send(200, storage.brain_automation_config(item))
                 elif self.path == '/api/brain/goal':
                     self.send(201, storage.create_goal(item))
                 elif self.path == '/api/brain/goal/action':
