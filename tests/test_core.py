@@ -195,7 +195,7 @@ class CoreTest(unittest.TestCase):
         self.assertIn('Чат с Тори', ui)
         self.assertIn('Тори ↔ Qwen', ui)
         self.assertIn('Разговор обучения', ui)
-        self.assertIn('Yandex AI Studio', ui)
+        self.assertIn('AI Studio', ui)
         self.assertIn('Qwen3.6 35B', ui)
         self.assertIn('Повторить', ui)
         self.assertIn('Пропустить', ui)
@@ -203,6 +203,44 @@ class CoreTest(unittest.TestCase):
         self.assertNotIn('Тори ещё не подключена', ui)
         self.assertNotIn('Открыть Браузер Тори', ui)
         self.assertNotIn('qwen/bridge', ui)
+
+    def test_schema_v3_learning_history_migrates_to_conversation(self):
+        with tempfile.TemporaryDirectory(prefix='Тори v3 ') as temporary:
+            path = Path(temporary) / 'tooru.sqlite3'
+            with sqlite3.connect(path) as db:
+                db.executescript("""
+                    PRAGMA user_version=3;
+                    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE records (
+                        id INTEGER PRIMARY KEY, kind TEXT NOT NULL,
+                        title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+                        source TEXT NOT NULL DEFAULT 'Пользователь',
+                        created_at TEXT NOT NULL DEFAULT '2026-09-30T00:00:00Z'
+                    );
+                    CREATE TABLE learning_queue (
+                        id INTEGER PRIMARY KEY,
+                        topic TEXT NOT NULL,
+                        question TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        response_text TEXT NOT NULL DEFAULT '',
+                        last_error TEXT NOT NULL DEFAULT '',
+                        input_tokens INTEGER NOT NULL DEFAULT 0,
+                        output_tokens INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                """)
+                db.execute(
+                    "INSERT INTO learning_queue(id,topic,question,status,response_text,input_tokens,output_tokens,created_at,updated_at) "
+                    "VALUES (1,'Сети','Как работает роутер?','done','Маршрутизатор пересылает пакеты.',20,10,"
+                    "'2026-09-30T00:00:00Z','2026-09-30T00:01:00Z')"
+                )
+            migrated = app.Storage(temporary)
+            messages = migrated.learning_state()['messages']
+            self.assertEqual([m['role'] for m in messages], ['tori', 'qwen'])
+            self.assertIn('роутер', messages[0]['text'])
+            self.assertIn('пакеты', messages[1]['text'])
 
     def test_schema_v4_has_ai_messages(self):
         with self.storage.connect() as db:
