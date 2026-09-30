@@ -436,6 +436,68 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(goal['plan'][0]['status'], 'queued')
         self.assertEqual(goal['plan'][1]['status'], 'done')
 
+    def test_brain_automation_promotes_only_learning_suggestions_with_limits(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/learning/control', {'action': 'start'})
+        state = self.request('/api/brain/automation', {
+            'enabled': True,
+            'min_confidence': 0.8,
+            'daily_limit': 2,
+        })
+        self.assertTrue(state['automation']['enabled'])
+        with self.storage.connect() as db:
+            db.execute(
+                "INSERT INTO brain_suggestions(kind,title,body,reason,confidence) "
+                "VALUES ('memory','Имя','Антон','Личный факт',0.99)"
+            )
+            db.execute(
+                "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                "VALUES ('learning','','SQLite','Что такое WAL?','Учебный пробел',0.85)"
+            )
+            db.execute(
+                "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                "VALUES ('learning','','Python','Что такое GIL?','Ниже порога',0.70)"
+            )
+        promoted = self.storage.promote_autonomous_learning()
+        self.assertIsNotNone(promoted)
+        state = self.request('/api/learning/status')
+        active = [x for x in state['queue'] if x['status'] in {'pending','running'}]
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]['topic'], 'SQLite')
+        self.assertEqual(state['automation']['today_count'], 1)
+        pending = state['suggestions']
+        self.assertTrue(any(x['kind'] == 'memory' for x in pending))
+        self.assertTrue(any(x['kind'] == 'learning' and x['topic'] == 'Python' for x in pending))
+
+    def test_brain_automation_respects_daily_limit(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/learning/control', {'action': 'start'})
+        self.request('/api/brain/automation', {
+            'enabled': True,
+            'min_confidence': 0.5,
+            'daily_limit': 1,
+        })
+        with self.storage.connect() as db:
+            for index in range(2):
+                db.execute(
+                    "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
+                    "VALUES ('learning','',?,?,?,0.9)",
+                    (f'Topic {index}', f'Question {index}', 'test')
+                )
+        self.assertIsNotNone(self.storage.promote_autonomous_learning())
+        with self.storage.connect() as db:
+            db.execute("UPDATE learning_queue SET status='done'")
+        self.assertIsNone(self.storage.promote_autonomous_learning())
+        self.assertEqual(self.request('/api/learning/status')['automation']['today_count'], 1)
+
     def test_learning_self_review_is_saved_and_gaps_need_approval(self):
         self.request('/api/ai/config', {
             'folder_id': 'b1gpcfme4j9b9bv37hqb',
