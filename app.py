@@ -115,7 +115,7 @@ class Storage:
             )] for kind in sorted(KINDS)}
         learning = self.learning_state()
         return dict(version=VERSION, settings=settings, counts=counts, records=records,
-                    ai_connected=learning['configured'], learning=learning)
+                    ai_connected=learning['configured'] and learning['last_success'] > 0, learning=learning)
 
     def add(self, item):
         kind, title = item.get('kind'), item.get('title', '')
