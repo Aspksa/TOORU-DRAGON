@@ -3001,6 +3001,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.chat_state())
                 elif path == '/api/brain/reason/status':
                     self.send(200, storage.reasoning_state())
+                elif path == '/api/brain/lab':
+                    self.send(200, storage.brain_lab_state())
                 elif path == '/api/dragon/status':
                     self.send(200, storage.dragon_status())
                 elif path == '/api/dragon/project':
@@ -3064,6 +3066,18 @@ def make_server(storage, port=8765):
                     self.send(200, storage.brain_automation_config(item))
                 elif self.path == '/api/brain/reason':
                     self.send(200, storage.reason_problem(item))
+                elif self.path == '/api/brain/context':
+                    self.send(200, storage.save_work_context(item))
+                elif self.path == '/api/brain/experiment':
+                    self.send(201, storage.create_brain_experiment(item))
+                elif self.path == '/api/brain/experiment/action':
+                    experiment_id = item.get('id')
+                    if type(experiment_id) is not int:
+                        raise ValueError('Некорректный номер эксперимента.')
+                    result = storage.run_brain_experiment(experiment_id)
+                    if not result:
+                        raise ValueError('Эксперимент не найден или уже выполняется.')
+                    self.send(200, result)
                 elif self.path == '/api/brain/goal':
                     self.send(201, storage.create_goal(item))
                 elif self.path == '/api/brain/goal/action':
