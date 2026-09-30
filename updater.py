@@ -26,6 +26,7 @@ USER_AGENT = "TOORU-DRAGON-Updater/0.0.0"
 STATE_REL = Path("data") / "update_state.json"
 LOG_REL = Path("data") / "logs" / "update.log"
 MANIFEST_REL = Path("data") / "update_manifest.json"
+HISTORY_REL = Path("data") / "update_history.json"
 BACKUPS_REL = Path("backups")
 PROTECTED_TOP_LEVEL = {"data", "python", "backups", ".git"}
 PROTECTED_FILES = {"UpdateTooruDragon.bat"}
@@ -118,6 +119,13 @@ def revision_changes(installed: str, latest: str) -> list[dict]:
     return result
 
 
+def update_history(root: Path) -> list[dict]:
+    history = read_json(root / HISTORY_REL, [])
+    if not isinstance(history, list):
+        return []
+    return [item for item in history if isinstance(item, dict)][-20:]
+
+
 def local_status(root: Path) -> dict:
     remote = latest_revision()
     state = read_json(root / STATE_REL, {})
@@ -138,10 +146,14 @@ def local_status(root: Path) -> dict:
         "files_available": bool(installed) and bool(re.fullmatch(r"[0-9a-fA-F]{40}", installed or "")),
         "update_available": not installed or installed != remote["sha"],
         "tracked": bool(installed),
+        "installed_at": state.get("updated_at", "") if isinstance(state, dict) else "",
+        "last_backup": state.get("backup", "") if isinstance(state, dict) else "",
+        "last_download_bytes": state.get("download_bytes", 0) if isinstance(state, dict) else 0,
+        "history": list(reversed(update_history(root))),
     }
 
 
-def download_zip(root: Path, destination: Path) -> None:
+def download_zip(root: Path, destination: Path) -> int:
     request = urllib.request.Request(ZIP_URL, headers={"User-Agent": USER_AGENT})
     log(root, "Скачивание обновления с GitHub...")
     with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as output:
@@ -162,8 +174,10 @@ def download_zip(root: Path, destination: Path) -> None:
                 else:
                     log(root, f"Загружено {downloaded / 1048576:.1f} МБ.")
                 next_report = downloaded + 5 * 1048576
-    if destination.stat().st_size == 0:
+    size = destination.stat().st_size
+    if size == 0:
         raise RuntimeError("GitHub вернул пустой ZIP.")
+    return size
 
 
 def safe_extract(zip_path: Path, destination: Path) -> Path:
@@ -371,16 +385,50 @@ def perform_update(root: Path, expected_revision: str = "") -> dict:
     revision = remote["sha"]
     if expected_revision and expected_revision != revision:
         log(root, "Ветка main изменилась после проверки; будет установлена самая свежая версия.")
+    previous_state = read_json(root / STATE_REL, {})
+    previous_revision = previous_state.get("revision", "") if isinstance(previous_state, dict) else ""
+    changes = revision_changes(previous_revision, revision) if previous_revision else []
     stage = Path(tempfile.mkdtemp(prefix=".update-", dir=root))
     try:
         zip_path = stage / "update.zip"
         extract_dir = stage / "extract"
-        download_zip(root, zip_path)
+        download_bytes = download_zip(root, zip_path)
         source_root = safe_extract(zip_path, extract_dir)
         backup = apply_source(root, source_root, revision)
+        backup_rel = backup.relative_to(root).as_posix()
+        installed_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        state = read_json(root / STATE_REL, {})
+        if not isinstance(state, dict):
+            state = {}
+        state.update({
+            "updated_at": installed_at,
+            "backup": backup_rel,
+            "download_bytes": download_bytes,
+            "title": remote.get("message", ""),
+            "description": remote.get("description", ""),
+        })
+        atomic_write_json(root / STATE_REL, state)
+        history = update_history(root)
+        history.append({
+            "revision": revision,
+            "previous_revision": previous_revision,
+            "installed_at": installed_at,
+            "title": remote.get("message", ""),
+            "description": remote.get("description", ""),
+            "download_bytes": download_bytes,
+            "backup": backup_rel,
+            "files": changes,
+        })
+        atomic_write_json(root / HISTORY_REL, history[-20:])
         log(root, f"Обновление установлено: {revision[:12]}.")
-        log(root, f"Резервная копия изменённых системных файлов: {backup.relative_to(root)}")
-        return {"revision": revision, "backup": str(backup)}
+        log(root, f"Скачано: {download_bytes / 1048576:.2f} МБ.")
+        log(root, f"Резервная копия изменённых системных файлов: {backup_rel}")
+        return {
+            "revision": revision,
+            "backup": str(backup),
+            "download_bytes": download_bytes,
+            "files": changes,
+        }
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
