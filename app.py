@@ -36,7 +36,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 3:
+            if version > 4:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -62,6 +62,17 @@ class Storage:
                     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 CREATE INDEX IF NOT EXISTS learning_queue_status_id ON learning_queue(status, id);
+                CREATE TABLE IF NOT EXISTS ai_messages (
+                    id INTEGER PRIMARY KEY,
+                    channel TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    queue_id INTEGER,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS ai_messages_channel_id ON ai_messages(channel, id DESC);
             ''')
             if version < 3:
                 old_queue = db.execute(
@@ -85,6 +96,28 @@ class Storage:
                 db.execute("DELETE FROM settings WHERE key IN "
                            "('qwen_mode','qwen_owner','qwen_last_seen','secret.qwen_bridge')")
                 db.execute('PRAGMA user_version=3')
+            if version < 4:
+                existing_messages = db.execute(
+                    "SELECT 1 FROM ai_messages WHERE channel='learning' LIMIT 1"
+                ).fetchone()
+                if not existing_messages:
+                    for row in db.execute(
+                        'SELECT id,question,status,response_text,input_tokens,output_tokens,created_at,updated_at '
+                        'FROM learning_queue ORDER BY id'
+                    ).fetchall():
+                        db.execute(
+                            'INSERT INTO ai_messages(channel,role,text,queue_id,created_at) '
+                            'VALUES (?,?,?,?,?)',
+                            ('learning', 'tori', row['question'], row['id'], row['created_at'])
+                        )
+                        if row['status'] == 'done' and row['response_text']:
+                            db.execute(
+                                'INSERT INTO ai_messages(channel,role,text,queue_id,input_tokens,output_tokens,created_at) '
+                                'VALUES (?,?,?,?,?,?,?)',
+                                ('learning', 'qwen', row['response_text'], row['id'],
+                                 row['input_tokens'], row['output_tokens'], row['updated_at'])
+                            )
+                db.execute('PRAGMA user_version=4')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
@@ -114,8 +147,10 @@ class Storage:
                 'SELECT * FROM records WHERE kind=? ORDER BY id DESC LIMIT 200', (kind,)
             )] for kind in sorted(KINDS)}
         learning = self.learning_state()
+        chat = self.chat_state()
         return dict(version=VERSION, settings=settings, counts=counts, records=records,
-                    ai_connected=learning['configured'] and learning['last_success'] > 0, learning=learning)
+                    ai_connected=learning['configured'] and learning['last_success'] > 0,
+                    learning=learning, chat=chat)
 
     def add(self, item):
         kind, title = item.get('kind'), item.get('title', '')
@@ -175,9 +210,97 @@ class Storage:
             db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
                        ('ai_last_success', str(time.time())))
 
+    def ai_messages(self, channel, limit=100):
+        if channel not in {'chat', 'learning'}:
+            raise ValueError('Неизвестный канал диалога.')
+        limit = max(1, min(int(limit), 200))
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(
+                'SELECT id,channel,role,text,queue_id,input_tokens,output_tokens,created_at '
+                'FROM ai_messages WHERE channel=? ORDER BY id DESC LIMIT ?',
+                (channel, limit)
+            )]
+        rows.reverse()
+        return rows
+
+    def add_ai_message(self, channel, role, text, queue_id=None,
+                       input_tokens=0, output_tokens=0):
+        if channel not in {'chat', 'learning'}:
+            raise ValueError('Неизвестный канал диалога.')
+        if role not in {'user', 'tori', 'qwen', 'system'}:
+            raise ValueError('Неизвестный автор сообщения.')
+        if not isinstance(text, str) or not text.strip():
+            return None
+        clean = text.strip()[:50000]
+        with self.connect() as db:
+            cursor = db.execute(
+                'INSERT INTO ai_messages(channel,role,text,queue_id,input_tokens,output_tokens) '
+                'VALUES (?,?,?,?,?,?)',
+                (channel, role, clean, queue_id, int(input_tokens or 0), int(output_tokens or 0))
+            )
+        return cursor.lastrowid
+
+    def chat_state(self):
+        config = self.ai_config()
+        return {
+            'configured': config['configured'],
+            'model': config['model'],
+            'last_success': config['last_success'],
+            'messages': self.ai_messages('chat', 100),
+        }
+
+    def chat_send(self, item):
+        text = item.get('text', '')
+        if not isinstance(text, str) or not 1 <= len(text.strip()) <= 12000:
+            raise ValueError('Сообщение должно содержать от 1 до 12 000 символов.')
+        clean = text.strip()
+        self.add_ai_message('chat', 'user', clean)
+        history = self.ai_messages('chat', 14)
+        transcript = []
+        for message in history[:-1]:
+            role = {'user': 'Пользователь', 'tori': 'Тори'}.get(message['role'])
+            if role:
+                transcript.append(f"{role}: {message['text']}")
+        prompt = clean
+        if transcript:
+            prompt = (
+                'Продолжи этот диалог, учитывая только приведённую историю беседы.\n\n'
+                + '\n\n'.join(transcript[-10:])
+                + '\n\nПользователь: ' + clean
+            )
+        try:
+            result = call_yandex_ai(self, prompt, purpose='chat')
+        except Exception as exc:
+            self.add_ai_message('chat', 'system', 'Ошибка ответа: ' + str(exc)[:700])
+            raise
+        self.add_ai_message(
+            'chat', 'tori', result['text'],
+            input_tokens=result['input_tokens'], output_tokens=result['output_tokens']
+        )
+        self.mark_ai_success()
+        return self.chat_state()
+
     def learning_state(self):
         cutoff = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - STALE_SECONDS))
         with self.connect() as db:
+            if not db.execute(
+                "SELECT 1 FROM ai_messages WHERE channel='learning' LIMIT 1"
+            ).fetchone():
+                for old in db.execute(
+                    'SELECT id,question,status,response_text,input_tokens,output_tokens,created_at,updated_at '
+                    'FROM learning_queue ORDER BY id'
+                ).fetchall():
+                    db.execute(
+                        'INSERT INTO ai_messages(channel,role,text,queue_id,created_at) VALUES (?,?,?,?,?)',
+                        ('learning', 'tori', old['question'], old['id'], old['created_at'])
+                    )
+                    if old['status'] == 'done' and old['response_text']:
+                        db.execute(
+                            'INSERT INTO ai_messages(channel,role,text,queue_id,input_tokens,output_tokens,created_at) '
+                            'VALUES (?,?,?,?,?,?,?)',
+                            ('learning', 'qwen', old['response_text'], old['id'],
+                             old['input_tokens'], old['output_tokens'], old['updated_at'])
+                        )
             db.execute(
                 "UPDATE learning_queue SET status='stale', "
                 "last_error='Ответ не завершён вовремя. Нажми «Повторить».', "
@@ -207,6 +330,7 @@ class Storage:
             'model': settings.get('ai_model', DEFAULT_YANDEX_MODEL),
             'last_success': float(settings.get('ai_last_success', '0') or 0),
             'queue': queue,
+            'messages': self.ai_messages('learning', 120),
             'memory_count': memory_count,
             'knowledge_count': knowledge_count,
             'stale_seconds': STALE_SECONDS,
@@ -228,12 +352,16 @@ class Storage:
             raise ValueError('Тема должна содержать от 1 до 300 символов.')
         if not isinstance(question, str) or not 1 <= len(question.strip()) <= 8000:
             raise ValueError('Вопрос должен содержать от 1 до 8 000 символов.')
+        clean_topic = topic.strip()
+        clean_question = question.strip()
         with self.connect() as db:
             cursor = db.execute(
                 'INSERT INTO learning_queue(topic,question) VALUES (?,?)',
-                (topic.strip(), question.strip())
+                (clean_topic, clean_question)
             )
-        return {'id': cursor.lastrowid}
+            queue_id = cursor.lastrowid
+        self.add_ai_message('learning', 'tori', clean_question, queue_id=queue_id)
+        return {'id': queue_id}
 
     def learning_action(self, item):
         queue_id = item.get('id')
@@ -270,8 +398,13 @@ class Storage:
                     "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                     (queue_id,)
                 )
+                question = db.execute(
+                    'SELECT question FROM learning_queue WHERE id=?', (queue_id,)
+                ).fetchone()['question']
             else:
                 raise ValueError('Неизвестное действие с задачей.')
+        if action == 'retry':
+            self.add_ai_message('learning', 'tori', 'Повтор: ' + question, queue_id=queue_id)
         return self.learning_state()
 
     def claim_learning(self):
@@ -320,6 +453,10 @@ class Storage:
                 ('knowledge', 'Qwen · ' + row['topic'], clean[:20000],
                  'Yandex AI Studio · ' + model)
             )
+        self.add_ai_message(
+            'learning', 'qwen', clean, queue_id=queue_id,
+            input_tokens=input_tokens, output_tokens=output_tokens
+        )
         self.mark_ai_success()
         return True
 
@@ -332,6 +469,8 @@ class Storage:
                 "WHERE id=? AND status='running'",
                 (message, queue_id)
             )
+
+        self.add_ai_message('learning', 'system', message, queue_id=queue_id)
 
     def backup(self):
         destination = self.directory / 'backups' / (time.strftime('tooru-%Y%m%d-%H%M%S-') + secrets.token_hex(3) + '.sqlite3')
@@ -380,16 +519,25 @@ def extract_response_text(data):
     return '\n\n'.join(parts).strip()
 
 
-def call_yandex_ai(storage, question, topic='', max_output_tokens=1500):
+def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose='learning'):
     config = storage.ai_config(include_secret=True)
     if not config.get('api_key'):
         raise ValueError('Сначала добавь API-ключ Yandex AI Studio.')
-    instructions = (
-        'Ты источник знаний для личного помощника Тори. Отвечай по-русски, точно и структурированно. '
-        'Не выдумывай факты. Если в вопросе не хватает данных, явно укажи это. '
-        'Дай итог, который можно сохранить в базу знаний. '
-        + (('Тема: ' + topic + '.') if topic else '')
-    )
+    if purpose == 'chat':
+        instructions = (
+            'Ты Тори — личный помощник пользователя в TOORU · DRAGON. '
+            'Отвечай по-русски, естественно, полезно и без лишних повторов. '
+            'Не утверждай, что помнишь данные, которых нет в переданной истории. '
+            'Если информации недостаточно, скажи об этом прямо.'
+        )
+    else:
+        instructions = (
+            'Ты Qwen — источник знаний для личного помощника Тори. '
+            'Отвечай по-русски, точно и структурированно. '
+            'Не выдумывай факты. Если в вопросе не хватает данных, явно укажи это. '
+            'Дай итог, который можно сохранить в базу знаний. '
+            + (('Тема: ' + topic + '.') if topic else '')
+        )
     payload = json.dumps({
         'model': f"gpt://{config['folder_id']}/{config['model']}",
         'temperature': 0.3,
@@ -445,7 +593,7 @@ class LearningWorker(threading.Thread):
             if not item:
                 continue
             try:
-                result = call_yandex_ai(self.storage, item['question'], item['topic'])
+                result = call_yandex_ai(self.storage, item['question'], item['topic'], purpose='learning')
                 self.storage.complete_learning(
                     item['id'], result['text'],
                     result['input_tokens'], result['output_tokens']
@@ -536,6 +684,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.diagnostics())
                 elif self.path == '/api/learning/status':
                     self.send(200, storage.learning_state())
+                elif self.path == '/api/chat/status':
+                    self.send(200, storage.chat_state())
                 else:
                     self.send(404, {'error': 'Страница не найдена.'})
             except Exception:
@@ -582,6 +732,8 @@ def make_server(storage, port=8765):
                     self.send(201, storage.learning_enqueue(item))
                 elif self.path == '/api/learning/action':
                     self.send(200, storage.learning_action(item))
+                elif self.path == '/api/chat/send':
+                    self.send(200, storage.chat_send(item))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
                 else:

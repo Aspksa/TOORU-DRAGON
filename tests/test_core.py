@@ -127,6 +127,10 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(task['output_tokens'], 40)
         self.assertEqual(state['records']['knowledge'][0]['source'],
                          'Yandex AI Studio · qwen3.6-35b-a3b/latest')
+        messages = state['learning']['messages']
+        self.assertEqual([m['role'] for m in messages[-2:]], ['tori', 'qwen'])
+        self.assertIn('Что такое WAL?', messages[-2]['text'])
+        self.assertIn('WAL', messages[-1]['text'])
 
         stale = self.request('/api/learning/queue', {'topic': 'Сбой', 'question': 'Зависни'})
         with self.storage.connect() as db:
@@ -151,6 +155,24 @@ class CoreTest(unittest.TestCase):
         call.assert_called_once()
         self.assertGreater(self.request('/api/learning/status')['last_success'], 0)
 
+    def test_real_tori_chat_persists_user_and_assistant_messages(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        with patch('app.call_yandex_ai', return_value={
+            'text': 'Привет! Я Тори.', 'input_tokens': 12, 'output_tokens': 6
+        }) as call:
+            chat = self.request('/api/chat/send', {'text': 'Привет'})
+        self.assertEqual([m['role'] for m in chat['messages'][-2:]], ['user', 'tori'])
+        self.assertEqual(chat['messages'][-1]['text'], 'Привет! Я Тори.')
+        self.assertEqual(chat['messages'][-1]['input_tokens'], 12)
+        self.assertEqual(chat['messages'][-1]['output_tokens'], 6)
+        self.assertEqual(call.call_args.kwargs['purpose'], 'chat')
+        public = self.request('/api/state')
+        self.assertEqual(public['chat']['messages'][-1]['role'], 'tori')
+
     def test_extract_response_text_handles_null_content(self):
         response = {
             'output_text': None,
@@ -170,13 +192,62 @@ class CoreTest(unittest.TestCase):
 
     def test_learning_ui_uses_ai_studio_and_queue_actions(self):
         ui = (app.ROOT / 'web' / 'app.js').read_text('utf-8')
-        self.assertIn('Yandex AI Studio', ui)
+        self.assertIn('Чат с Тори', ui)
+        self.assertIn('Тори ↔ Qwen', ui)
+        self.assertIn('Разговор обучения', ui)
+        self.assertIn('AI Studio', ui)
         self.assertIn('Qwen3.6 35B', ui)
         self.assertIn('Повторить', ui)
         self.assertIn('Пропустить', ui)
         self.assertIn('Отменить', ui)
+        self.assertNotIn('Тори ещё не подключена', ui)
         self.assertNotIn('Открыть Браузер Тори', ui)
         self.assertNotIn('qwen/bridge', ui)
+
+    def test_schema_v3_learning_history_migrates_to_conversation(self):
+        with tempfile.TemporaryDirectory(prefix='Тори v3 ') as temporary:
+            path = Path(temporary) / 'tooru.sqlite3'
+            with closing(sqlite3.connect(path)) as db:
+                db.executescript("""
+                    PRAGMA user_version=3;
+                    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE records (
+                        id INTEGER PRIMARY KEY, kind TEXT NOT NULL,
+                        title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+                        source TEXT NOT NULL DEFAULT 'Пользователь',
+                        created_at TEXT NOT NULL DEFAULT '2026-09-30T00:00:00Z'
+                    );
+                    CREATE TABLE learning_queue (
+                        id INTEGER PRIMARY KEY,
+                        topic TEXT NOT NULL,
+                        question TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        response_text TEXT NOT NULL DEFAULT '',
+                        last_error TEXT NOT NULL DEFAULT '',
+                        input_tokens INTEGER NOT NULL DEFAULT 0,
+                        output_tokens INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                """)
+                db.execute(
+                    "INSERT INTO learning_queue(id,topic,question,status,response_text,input_tokens,output_tokens,created_at,updated_at) "
+                    "VALUES (1,'Сети','Как работает роутер?','done','Маршрутизатор пересылает пакеты.',20,10,"
+                    "'2026-09-30T00:00:00Z','2026-09-30T00:01:00Z')"
+                )
+                db.commit()
+            migrated = app.Storage(temporary)
+            messages = migrated.learning_state()['messages']
+            self.assertEqual([m['role'] for m in messages], ['tori', 'qwen'])
+            self.assertIn('роутер', messages[0]['text'])
+            self.assertIn('пакеты', messages[1]['text'])
+
+    def test_schema_v4_has_ai_messages(self):
+        with self.storage.connect() as db:
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
+            columns = {row[1] for row in db.execute('PRAGMA table_info(ai_messages)').fetchall()}
+        self.assertTrue({'channel','role','text','queue_id','input_tokens','output_tokens'} <= columns)
 
     def test_duplicate_launcher_and_lock(self):
         lock = app.InstanceLock(Path(self.temp.name) / 'instance.lock')
