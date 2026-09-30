@@ -862,11 +862,45 @@ class Storage:
         try:
             evidence = ''
             if row['experiment_type'] == 'project_scan':
-                files = self.dragon_project_tree(600)
-                sample = [x['path'] for x in files[:180]]
+                files = self.dragon_project_tree(800)
+                hypothesis_text = (
+                    row['hypothesis'] + ' ' + row['plan'] + ' ' + row['expected_result']
+                ).lower()
+                terms = {
+                    token for token in re.findall(r'[a-zа-яё0-9_.-]{3,}', hypothesis_text, re.I)
+                    if token not in {'что','это','для','как','или','при','над','под','проверить','результат'}
+                }
+                text_ext = {'.py','.js','.css','.html','.md','.json','.jsonl','.bat','.yml','.yaml','.txt'}
+                ranked = []
+                for item in files:
+                    path = item['path']
+                    suffix = Path(path).suffix.lower()
+                    if suffix not in text_ext or int(item.get('size', 0)) > 180000:
+                        continue
+                    low = path.lower()
+                    score = sum(3 if term in low else 0 for term in terms)
+                    if any(key in low for key in ('app.py','web/app.js','web/style.css','agents.md','release.json')):
+                        score += 1
+                    ranked.append((score, path))
+                ranked.sort(key=lambda pair: (-pair[0], pair[1]))
+                chosen = [path for _, path in ranked[:5]]
+                blocks = []
+                char_budget = 24000
+                for path in chosen:
+                    try:
+                        payload = self.dragon_read_project_file(path)
+                    except ValueError:
+                        continue
+                    snippet = payload['text'][:min(7000, char_budget)]
+                    char_budget -= len(snippet)
+                    blocks.append(f"Файл {path}:\n{snippet}")
+                    if char_budget <= 0:
+                        break
                 evidence = (
                     f"Проект содержит {len(files)} доступных файлов. "
-                    "Примеры путей:\n" + '\n'.join(sample)
+                    f"Для проверки выбраны {len(blocks)} релевантных файлов.\n\n"
+                    + ('\n\n---\n\n'.join(blocks) if blocks else
+                       'Подходящих текстовых файлов для безопасного чтения не найдено.')
                 )
             else:
                 ctx = self.relevant_context(row['hypothesis'], limit=6, char_budget=7000)
@@ -944,12 +978,26 @@ class Storage:
                 )
             return {'id': row['id'], 'status': 'done', 'verdict': verdict}
         except Exception as exc:
+            error_text = str(exc)[:3000]
             with self.connect() as db:
                 db.execute(
                     "UPDATE brain_experiments SET status='error',actual_result=?,"
                     "updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
-                    (str(exc)[:3000], row['id'])
+                    (error_text, row['id'])
                 )
+            self.dragon_log_action(
+                'experiment', str(row['id']), 'Эксперимент Разума завершился ошибкой',
+                {'error': error_text, 'hypothesis': row['hypothesis'][:500]}, status='error'
+            )
+            self.dragon_notify(
+                'error', 'Ошибка эксперимента', row['hypothesis'][:300],
+                action='experiment', category='error',
+                group_key='experiment:' + str(row['id'])
+            )
+            self.save_work_context({
+                'last_decision': 'Эксперимент не дал результата из-за ошибки: ' + error_text[:900],
+                'next_step': 'Исправить причину ошибки эксперимента и повторить проверку.',
+            }, source='experiment_error')
             logging.warning('Brain experiment %s failed: %s', row['id'], exc)
             return {'id': row['id'], 'status': 'error', 'error': str(exc)}
 
