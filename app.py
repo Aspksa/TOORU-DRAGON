@@ -40,7 +40,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 5:
+            if version > 6:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -78,6 +78,22 @@ class Storage:
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 CREATE INDEX IF NOT EXISTS ai_messages_channel_id ON ai_messages(channel, id DESC);
+                CREATE TABLE IF NOT EXISTS brain_suggestions (
+                    id INTEGER PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL DEFAULT '',
+                    topic TEXT NOT NULL DEFAULT '',
+                    question TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    source_message_id INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                    decided_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS brain_suggestions_status_id
+                    ON brain_suggestions(status, id DESC);
             ''')
             if version < 3:
                 old_queue = db.execute(
@@ -128,6 +144,26 @@ class Storage:
                 if 'context_json' not in columns:
                     db.execute("ALTER TABLE ai_messages ADD COLUMN context_json TEXT NOT NULL DEFAULT '[]'")
                 db.execute('PRAGMA user_version=5')
+            if version < 6:
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS brain_suggestions (
+                        id INTEGER PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        body TEXT NOT NULL DEFAULT '',
+                        topic TEXT NOT NULL DEFAULT '',
+                        question TEXT NOT NULL DEFAULT '',
+                        reason TEXT NOT NULL DEFAULT '',
+                        confidence REAL NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        source_message_id INTEGER,
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                        decided_at TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS brain_suggestions_status_id
+                        ON brain_suggestions(status, id DESC);
+                """)
+                db.execute('PRAGMA user_version=6')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
@@ -251,7 +287,7 @@ class Storage:
         month_start = time.strftime('%Y-%m-01T00:00:00Z', time.gmtime(now))
 
         def totals_since(cutoff, channel=None):
-            where = "created_at>=? AND role IN ('tori','qwen')"
+            where = "created_at>=? AND (input_tokens>0 OR output_tokens>0)"
             params = [cutoff]
             if channel:
                 where += ' AND channel=?'
@@ -309,7 +345,7 @@ class Storage:
                        ('ai_last_success', str(time.time())))
 
     def ai_messages(self, channel, limit=100):
-        if channel not in {'chat', 'learning'}:
+        if channel not in {'chat', 'learning', 'brain'}:
             raise ValueError('Неизвестный канал диалога.')
         limit = max(1, min(int(limit), 200))
         with self.connect() as db:
@@ -330,7 +366,7 @@ class Storage:
 
     def add_ai_message(self, channel, role, text, queue_id=None,
                        input_tokens=0, output_tokens=0, context=None):
-        if channel not in {'chat', 'learning'}:
+        if channel not in {'chat', 'learning', 'brain'}:
             raise ValueError('Неизвестный канал диалога.')
         if role not in {'user', 'tori', 'qwen', 'system'}:
             raise ValueError('Неизвестный автор сообщения.')
@@ -404,6 +440,139 @@ class Storage:
                 break
         return result
 
+    def brain_suggestions(self, status='pending', limit=30):
+        if status not in {'pending', 'accepted', 'rejected', 'all'}:
+            raise ValueError('Неизвестный статус предложений.')
+        query = ('SELECT id,kind,title,body,topic,question,reason,confidence,status,'
+                 'source_message_id,created_at,decided_at FROM brain_suggestions')
+        params = []
+        if status != 'all':
+            query += ' WHERE status=?'
+            params.append(status)
+        query += ' ORDER BY id DESC LIMIT ?'
+        params.append(max(1, min(int(limit), 100)))
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(query, params)]
+
+    @staticmethod
+    def _parse_brain_json(text):
+        if not isinstance(text, str):
+            return []
+        clean = text.strip()
+        if clean.startswith('```'):
+            clean = re.sub(r'^```(?:json)?\s*|\s*```$', '', clean, flags=re.I | re.S).strip()
+        try:
+            data = json.loads(clean)
+        except (ValueError, TypeError):
+            start, end = clean.find('{'), clean.rfind('}')
+            if start < 0 or end <= start:
+                return []
+            try:
+                data = json.loads(clean[start:end + 1])
+            except (ValueError, TypeError):
+                return []
+        suggestions = data.get('suggestions', []) if isinstance(data, dict) else []
+        return suggestions if isinstance(suggestions, list) else []
+
+    def brain_reflect(self, user_text, assistant_text, source_message_id):
+        if self.usage_summary()['blocked']:
+            return []
+        prompt = (
+            'Проанализируй только этот обмен пользователя с Тори. '
+            'Верни только JSON вида {"suggestions":[...]}, максимум 3 элемента. '
+            'Допустимые kind: memory, knowledge, learning. '
+            'memory — только устойчивый личный факт или предпочтение, явно сказанное пользователем; '
+            'knowledge — полезный долговременный материал из ответа, который стоит сохранить; '
+            'learning — пробел или тема, которую стоит дополнительно изучить. '
+            'Для memory/knowledge нужны title и body. Для learning нужны topic и question. '
+            'Для всех нужны reason и confidence от 0 до 1. Не предлагай пустые или дублирующие вещи.\n\n'
+            'Пользователь:\n' + user_text[:6000] + '\n\nТори:\n' + assistant_text[:8000]
+        )
+        try:
+            result = call_yandex_ai(self, prompt, max_output_tokens=500, purpose='reflection')
+        except Exception as exc:
+            logging.warning('Brain reflection failed: %s', exc)
+            return []
+        self.add_ai_message('brain', 'system', 'Самоанализ диалога',
+                            input_tokens=result['input_tokens'], output_tokens=result['output_tokens'])
+        parsed = self._parse_brain_json(result['text'])
+        created = []
+        with self.connect() as db:
+            for raw in parsed[:3]:
+                if not isinstance(raw, dict):
+                    continue
+                kind = raw.get('kind')
+                if kind not in {'memory', 'knowledge', 'learning'}:
+                    continue
+                title = str(raw.get('title') or '').strip()[:300]
+                body = str(raw.get('body') or '').strip()[:20000]
+                topic = str(raw.get('topic') or '').strip()[:300]
+                question = str(raw.get('question') or '').strip()[:8000]
+                reason = str(raw.get('reason') or '').strip()[:1000]
+                try:
+                    confidence = max(0.0, min(float(raw.get('confidence', 0)), 1.0))
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                if kind in {'memory', 'knowledge'} and (not title or not body):
+                    continue
+                if kind == 'learning' and (not topic or not question):
+                    continue
+                duplicate = db.execute(
+                    "SELECT 1 FROM brain_suggestions WHERE status='pending' AND kind=? "
+                    "AND lower(title)=lower(?) AND lower(topic)=lower(?) AND lower(question)=lower(?) LIMIT 1",
+                    (kind, title, topic, question)
+                ).fetchone()
+                if duplicate:
+                    continue
+                if kind in {'memory', 'knowledge'}:
+                    exists = db.execute(
+                        'SELECT 1 FROM records WHERE kind=? AND lower(title)=lower(?) LIMIT 1',
+                        (kind, title)
+                    ).fetchone()
+                    if exists:
+                        continue
+                cursor = db.execute(
+                    'INSERT INTO brain_suggestions(kind,title,body,topic,question,reason,confidence,source_message_id) '
+                    'VALUES (?,?,?,?,?,?,?,?)',
+                    (kind, title, body, topic, question, reason, confidence, source_message_id)
+                )
+                created.append(cursor.lastrowid)
+        return created
+
+    def decide_brain_suggestion(self, item):
+        suggestion_id = item.get('id')
+        action = item.get('action')
+        if type(suggestion_id) is not int or action not in {'accept', 'reject'}:
+            raise ValueError('Некорректное действие с предложением.')
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM brain_suggestions WHERE id=? AND status='pending'",
+                (suggestion_id,)
+            ).fetchone()
+            if not row:
+                raise ValueError('Предложение уже обработано или не найдено.')
+            row = dict(row)
+            if action == 'reject':
+                db.execute(
+                    "UPDATE brain_suggestions SET status='rejected',decided_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (suggestion_id,)
+                )
+                return {'ok': True, 'status': 'rejected'}
+        if row['kind'] in {'memory', 'knowledge'}:
+            with self.connect() as db:
+                db.execute(
+                    'INSERT INTO records(kind,title,body,source) VALUES (?,?,?,?)',
+                    (row['kind'], row['title'], row['body'], 'Тори · предложение из чата')
+                )
+        else:
+            self.learning_enqueue({'topic': row['topic'], 'question': row['question']})
+        with self.connect() as db:
+            db.execute(
+                "UPDATE brain_suggestions SET status='accepted',decided_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                (suggestion_id,)
+            )
+        return {'ok': True, 'status': 'accepted'}
+
     def chat_state(self):
         config = self.ai_config()
         return {
@@ -412,6 +581,7 @@ class Storage:
             'last_success': config['last_success'],
             'messages': self.ai_messages('chat', 100),
             'usage': self.usage_summary(),
+            'suggestions': self.brain_suggestions('pending', 20),
         }
 
     def chat_send(self, item):
@@ -419,6 +589,7 @@ class Storage:
         if not isinstance(text, str) or not 1 <= len(text.strip()) <= 12000:
             raise ValueError('Сообщение должно содержать от 1 до 12 000 символов.')
         use_context = item.get('use_context', True) is not False
+        analyze = item.get('analyze', True) is not False
         clean = text.strip()
         self.ensure_budget()
         self.add_ai_message('chat', 'user', clean)
@@ -463,12 +634,14 @@ class Storage:
             }
             for entry in context
         ]
-        self.add_ai_message(
+        tori_message_id = self.add_ai_message(
             'chat', 'tori', result['text'],
             input_tokens=result['input_tokens'], output_tokens=result['output_tokens'],
             context=visible_context
         )
         self.mark_ai_success()
+        if analyze:
+            self.brain_reflect(clean, result['text'], tori_message_id)
         return self.chat_state()
 
     def learning_state(self):
@@ -725,6 +898,11 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
             'Не утверждай, что помнишь данные, которых нет в переданной истории. '
             'Если информации недостаточно, скажи об этом прямо.'
         )
+    elif purpose == 'reflection':
+        instructions = (
+            'Ты внутренний аналитический модуль Тори. '
+            'Не разговаривай с пользователем. Возвращай только валидный JSON без Markdown.'
+        )
     else:
         instructions = (
             'Ты Qwen — источник знаний для личного помощника Тори. '
@@ -929,6 +1107,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.learning_action(item))
                 elif self.path == '/api/chat/send':
                     self.send(200, storage.chat_send(item))
+                elif self.path == '/api/brain/action':
+                    self.send(200, storage.decide_brain_suggestion(item))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
                 else:
