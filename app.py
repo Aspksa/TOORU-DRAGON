@@ -1011,7 +1011,7 @@ class Storage:
             settings = dict(db.execute(
                 "SELECT key,value FROM settings WHERE key IN "
                 "('learning_mode','ai_folder_id','ai_model','ai_last_success','ai_auth_type','secret.yandex_api_key',"
-                "'brain_auto_learning','brain_auto_min_confidence','brain_auto_daily_limit','brain_auto_day','brain_auto_count')"
+                "'brain_auto_learning','brain_auto_min_confidence','brain_auto_daily_limit','brain_auto_chain_limit','brain_auto_day','brain_auto_count')"
             ).fetchall())
             queue = [dict(row) for row in db.execute(
                 'SELECT id,topic,question,status,attempts,substr(response_text,1,1200) AS response_text,'
@@ -1049,6 +1049,7 @@ class Storage:
                 'enabled': settings.get('brain_auto_learning', '0') == '1',
                 'min_confidence': float(settings.get('brain_auto_min_confidence', '0.75') or 0.75),
                 'daily_limit': int(settings.get('brain_auto_daily_limit', '5') or 5),
+                'chain_limit': int(settings.get('brain_auto_chain_limit', '3') or 3),
                 'today_count': (
                     int(settings.get('brain_auto_count', '0') or 0)
                     if settings.get('brain_auto_day', '') == time.strftime('%Y-%m-%d', time.gmtime())
@@ -1064,12 +1065,15 @@ class Storage:
         try:
             min_confidence = float(item.get('min_confidence', 0.75))
             daily_limit = int(item.get('daily_limit', 5))
+            chain_limit = int(item.get('chain_limit', 3))
         except (TypeError, ValueError):
             raise ValueError('Некорректные параметры самообучения.') from None
         if not 0.5 <= min_confidence <= 0.95:
             raise ValueError('Порог уверенности должен быть от 0.50 до 0.95.')
         if not 1 <= daily_limit <= 20:
             raise ValueError('Дневной лимит должен быть от 1 до 20 задач.')
+        if not 1 <= chain_limit <= 6:
+            raise ValueError('Глубина одной учебной цепочки должна быть от 1 до 6.')
         with self.connect() as db:
             db.executemany(
                 'INSERT OR REPLACE INTO settings VALUES (?,?)',
@@ -1077,6 +1081,7 @@ class Storage:
                     ('brain_auto_learning', '1' if enabled else '0'),
                     ('brain_auto_min_confidence', str(min_confidence)),
                     ('brain_auto_daily_limit', str(daily_limit)),
+                    ('brain_auto_chain_limit', str(chain_limit)),
                 ]
             )
         return self.learning_state()
@@ -1085,19 +1090,21 @@ class Storage:
         if self.enforce_learning_budget()['blocked']:
             return None
         today = time.strftime('%Y-%m-%d', time.gmtime())
+        queued_message = None
         with self.connect() as db:
             settings = dict(db.execute(
                 "SELECT key,value FROM settings WHERE key IN "
                 "('learning_mode','brain_auto_learning','brain_auto_min_confidence',"
-                "'brain_auto_daily_limit','brain_auto_day','brain_auto_count')"
+                "'brain_auto_daily_limit','brain_auto_chain_limit','brain_auto_day','brain_auto_count')"
             ).fetchall())
             if settings.get('learning_mode') != 'running' or settings.get('brain_auto_learning') != '1':
                 return None
             try:
                 threshold = max(0.5, min(float(settings.get('brain_auto_min_confidence', '0.75')), 0.95))
                 daily_limit = max(1, min(int(settings.get('brain_auto_daily_limit', '5')), 20))
+                chain_limit = max(1, min(int(settings.get('brain_auto_chain_limit', '3')), 6))
             except (TypeError, ValueError):
-                threshold, daily_limit = 0.75, 5
+                threshold, daily_limit, chain_limit = 0.75, 5, 3
             count = int(settings.get('brain_auto_count', '0') or 0) if settings.get('brain_auto_day') == today else 0
             if count >= daily_limit:
                 return None
@@ -1106,51 +1113,122 @@ class Storage:
             ).fetchone()[0]
             if active >= 2:
                 return None
-            row = db.execute(
-                "SELECT id,topic,question,reason,confidence FROM brain_suggestions "
-                "WHERE status='pending' AND kind='learning' AND confidence>=? "
-                "ORDER BY confidence DESC,id ASC LIMIT 1",
-                (threshold,)
-            ).fetchone()
-            if not row:
-                return None
-            duplicate = db.execute(
-                "SELECT id FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
-                "AND status IN ('pending','running','done') LIMIT 1",
-                (row['topic'], row['question'])
-            ).fetchone()
-            if duplicate:
+
+            # Сначала продвигаем учебные шаги активных целей: это связывает самообучение с намерениями пользователя.
+            goals = db.execute(
+                "SELECT id,plan_json FROM brain_goals WHERE status='active' ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+            for goal in goals:
+                try:
+                    plan = json.loads(goal['plan_json'] or '[]')
+                except (ValueError, TypeError):
+                    plan = []
+                changed = False
+                for index, step in enumerate(plan):
+                    if not isinstance(step, dict) or step.get('type') != 'learning' or step.get('status') != 'pending':
+                        continue
+                    topic = str(step.get('topic') or '').strip()[:300]
+                    question = str(step.get('question') or '').strip()[:8000]
+                    if not topic or not question:
+                        continue
+                    duplicate = db.execute(
+                        "SELECT id FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
+                        "AND status IN ('pending','running','done') LIMIT 1",
+                        (topic, question)
+                    ).fetchone()
+                    if duplicate:
+                        step['status'] = 'queued'
+                        step['queue_id'] = duplicate['id']
+                        changed = True
+                        continue
+                    cursor = db.execute(
+                        'INSERT INTO learning_queue(topic,question) VALUES (?,?)',
+                        (topic, question)
+                    )
+                    queue_id = cursor.lastrowid
+                    step['status'] = 'queued'
+                    step['queue_id'] = queue_id
+                    step['auto'] = True
+                    changed = True
+                    db.execute(
+                        "UPDATE brain_goals SET plan_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                        (json.dumps(plan, ensure_ascii=False), goal['id'])
+                    )
+                    db.executemany(
+                        'INSERT OR REPLACE INTO settings VALUES (?,?)',
+                        [('brain_auto_day', today), ('brain_auto_count', str(count + 1))]
+                    )
+                    queued_message = ('goal', queue_id, topic, question, goal['id'])
+                    break
+                if changed and not queued_message:
+                    db.execute(
+                        "UPDATE brain_goals SET plan_json=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                        (json.dumps(plan, ensure_ascii=False), goal['id'])
+                    )
+                if queued_message:
+                    break
+
+            if not queued_message:
+                rows = db.execute(
+                    "SELECT id,topic,question,reason,confidence FROM brain_suggestions "
+                    "WHERE status='pending' AND kind='learning' AND confidence>=? "
+                    "ORDER BY confidence DESC,id ASC LIMIT 20",
+                    (threshold,)
+                ).fetchall()
+                row = None
+                for candidate in rows:
+                    # Ограничиваем глубину одной автоматической цепочки по теме в течение суток.
+                    topic_count = db.execute(
+                        "SELECT count(*) FROM brain_suggestions WHERE kind='learning' AND status='accepted' "
+                        "AND lower(topic)=lower(?) AND decided_at>=?",
+                        (candidate['topic'], today + 'T00:00:00Z')
+                    ).fetchone()[0]
+                    if topic_count >= chain_limit:
+                        continue
+                    row = candidate
+                    break
+                if not row:
+                    return None
+                duplicate = db.execute(
+                    "SELECT id FROM learning_queue WHERE lower(topic)=lower(?) AND lower(question)=lower(?) "
+                    "AND status IN ('pending','running','done') LIMIT 1",
+                    (row['topic'], row['question'])
+                ).fetchone()
+                if duplicate:
+                    db.execute(
+                        "UPDATE brain_suggestions SET status='accepted',"
+                        "decided_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                        (row['id'],)
+                    )
+                    return None
+                cursor = db.execute(
+                    'INSERT INTO learning_queue(topic,question) VALUES (?,?)',
+                    (row['topic'], row['question'])
+                )
+                queue_id = cursor.lastrowid
                 db.execute(
                     "UPDATE brain_suggestions SET status='accepted',"
                     "decided_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
                     (row['id'],)
                 )
-                return None
-            cursor = db.execute(
-                'INSERT INTO learning_queue(topic,question) VALUES (?,?)',
-                (row['topic'], row['question'])
-            )
-            queue_id = cursor.lastrowid
-            db.execute(
-                "UPDATE brain_suggestions SET status='accepted',"
-                "decided_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
-                (row['id'],)
-            )
-            db.executemany(
-                'INSERT OR REPLACE INTO settings VALUES (?,?)',
-                [('brain_auto_day', today), ('brain_auto_count', str(count + 1))]
-            )
-        self.add_ai_message(
-            'learning', 'tori',
-            'Самообучение: ' + row['question'],
-            queue_id=queue_id
-        )
+                db.executemany(
+                    'INSERT OR REPLACE INTO settings VALUES (?,?)',
+                    [('brain_auto_day', today), ('brain_auto_count', str(count + 1))]
+                )
+                queued_message = ('suggestion', queue_id, row['topic'], row['question'], row['id'])
+
+        if not queued_message:
+            return None
+        source, queue_id, topic, question, source_id = queued_message
+        prefix = 'Цель → самообучение: ' if source == 'goal' else 'Самообучение: '
+        self.add_ai_message('learning', 'tori', prefix + question, queue_id=queue_id)
         self.add_ai_message(
             'brain', 'system',
-            'Автоматически отправлена в обучение тема «' + row['topic'] + '» '
-            f'(уверенность {float(row["confidence"]):.0%}).'
+            ('Автоматически отправлен учебный шаг цели' if source == 'goal'
+             else 'Автоматически продолжена учебная цепочка')
+            + ' по теме «' + topic + '».'
         )
-        return {'id': queue_id, 'suggestion_id': row['id']}
+        return {'id': queue_id, 'source': source, 'source_id': source_id}
 
     def learning_control(self, action):
         modes = {'start': 'running', 'pause': 'paused', 'stop': 'stopped'}
@@ -1254,10 +1332,11 @@ class Storage:
             return {}
         prompt = (
             'Проверь качество учебного ответа. Верни только JSON: '
-            '{"verdict":"good|partial|uncertain","confidence":0.0,'
-            '"summary":"...","gaps":[{"topic":"...","question":"...","reason":"..."}]}. '
-            'Оцени полноту и внутреннюю непротиворечивость. Не придумывай внешнюю проверку источников, '
-            'если её не было. gaps — максимум 2 действительно полезных уточняющих вопроса.\n\n'
+            '{"verdict":"good|partial|uncertain","confidence":0.0,"quality_score":0.0,'
+            '"summary":"...","gaps":[{"topic":"...","question":"...","reason":"...","confidence":0.0}]}. '
+            'Оцени полноту, внутреннюю непротиворечивость и полезность ответа. Не придумывай внешнюю проверку источников, '
+            'если её не было. quality_score — общая полезность от 0 до 1. gaps — максимум 2 действительно полезных '
+            'следующих вопроса; confidence у gap означает уверенность, что этот следующий вопрос действительно нужен.\n\n'
             'Тема: ' + topic + '\nВопрос: ' + question + '\nОтвет:\n' + answer[:12000]
         )
         try:
@@ -1273,9 +1352,14 @@ class Storage:
             confidence = max(0.0, min(float(data.get('confidence', 0)), 1.0))
         except (TypeError, ValueError):
             confidence = 0.0
+        try:
+            quality_score = max(0.0, min(float(data.get('quality_score', confidence)), 1.0))
+        except (TypeError, ValueError):
+            quality_score = confidence
         review = {
             'verdict': verdict,
             'confidence': confidence,
+            'quality_score': quality_score,
             'summary': str(data.get('summary') or '').strip()[:2000],
             'gaps': [],
         }
@@ -1283,10 +1367,15 @@ class Storage:
         for raw in gaps[:2]:
             if not isinstance(raw, dict):
                 continue
+            try:
+                gap_confidence = max(0.0, min(float(raw.get('confidence', confidence)), 1.0))
+            except (TypeError, ValueError):
+                gap_confidence = confidence
             gap = {
                 'topic': str(raw.get('topic') or topic).strip()[:300],
                 'question': str(raw.get('question') or '').strip()[:8000],
                 'reason': str(raw.get('reason') or '').strip()[:1000],
+                'confidence': gap_confidence,
             }
             if gap['topic'] and gap['question']:
                 review['gaps'].append(gap)
@@ -1308,7 +1397,7 @@ class Storage:
                     "INSERT INTO brain_suggestions(kind,title,topic,question,reason,confidence) "
                     "VALUES ('learning','',?,?,?,?)",
                     (gap['topic'], gap['question'], gap.get('reason',''),
-                     float(review.get('confidence', 0) or 0))
+                     float(gap.get('confidence', review.get('confidence', 0)) or 0))
                 )
                 created += 1
         return created
@@ -1416,11 +1505,13 @@ def call_yandex_ai(storage, question, topic='', max_output_tokens=1500, purpose=
             'Не утверждай, что помнишь данные, которых нет в переданной истории. '
             'Если информации недостаточно, скажи об этом прямо.'
         )
-    elif purpose in {'reflection', 'planning', 'review'}:
+    elif purpose in {'reflection', 'planning', 'review', 'reasoning', 'critic'}:
         labels = {
             'reflection': 'внутренний аналитический модуль Тори',
             'planning': 'планировщик целей Тори',
             'review': 'модуль самопроверки знаний Тори',
+            'reasoning': 'модуль структурированного логического анализа Тори',
+            'critic': 'модуль критической проверки решения Тори',
         }
         instructions = (
             'Ты ' + labels[purpose] + '. '
