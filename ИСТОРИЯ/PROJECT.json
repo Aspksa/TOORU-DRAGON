@@ -23,7 +23,7 @@
     "version": "0.0.0",
     "repository": "https://github.com/Aspksa/TOORU-DRAGON",
     "branch": "main",
-    "code_baseline_commit": "d57277b9470ea9724d77b7d4621c236962e097e9",
+    "code_baseline_commit": "b60d633d506ad9727e46dc5b25108ad7b8b9e767",
     "stage": "Рабочий каркас с автоматическим обучением через Yandex AI Studio + Qwen3.6 35B; собственный чат Тори ещё не подключён.",
     "goal": "Личный помощник Тори с долговременной памятью, домашними и рабочими проектами, позднее мобильным доступом и обучением."
   },
@@ -306,7 +306,7 @@
       "Живой графический интерфейс не проверен: тестовый Chromium не удалось загрузить.",
       "Смена физического носителя и буквы диска требует пользовательской проверки."
     ],
-    "current_change_tests": "Ожидается финальный Windows CI для ветки yandex-ai-studio-v1 после миграции на schema_version 3.",
+    "current_change_tests": "Windows CI run 36660347475: portable Python tests, project history validation and node --check web/app.js all passed for Yandex AI Studio migration.",
     "portable": {
       "commit": "7c0775fed893d37565514e73452092832993ed47",
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36653894258",
@@ -330,6 +330,13 @@
       "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36658454930",
       "result": "success",
       "user_visual_test_pending": true
+    },
+    "yandex_ai_studio_v1": {
+      "branch_commit": "7a151031c3b8ddee24b934b4d49767a7d9c972eb",
+      "workflow": "https://github.com/Aspksa/TOORU-DRAGON/actions/runs/36660347475",
+      "result": "success",
+      "live_api_key_tested": false,
+      "note": "Реальный ключ пользователя намеренно не использовался и не записывался в репозиторий."
     }
   },
   "next_steps": [
