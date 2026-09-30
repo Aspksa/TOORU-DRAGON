@@ -207,7 +207,9 @@ function reasoningItemsMarkup(r){
     return '<article class="goal-card"><div class="brain-card-head"><div><span class="brain-kind">Логический разбор</span><h3>'+escapeHtml(item.problem)+'</h3></div><span class="status-label">'+Math.round((Number(x.confidence)||0)*100)+'%</span></div>'+
       (x.summary?'<p>'+escapeHtml(x.summary)+'</p>':'')+
       list('Факты',x.facts)+list('Допущения',x.assumptions)+options+list('Противоречия',x.contradictions)+
-      (x.decision?'<div class="review-box"><strong>Решение</strong><p>'+escapeHtml(x.decision)+'</p></div>':'')+
+      list('Слабые места',x.critique?.weaknesses)+list('Не хватает данных',x.critique?.missing_evidence)+
+      list('Что стоит изучить',(x.learning_gaps||[]).map(g=>g.topic+' — '+g.question))+
+      (x.decision?'<div class="review-box"><strong>Решение после проверки</strong><p>'+escapeHtml(x.decision)+'</p></div>':'')+
       (x.next_step?'<p><strong>Следующий шаг:</strong> '+escapeHtml(x.next_step)+'</p>':'')+
       sources+'<small>'+escapeHtml(fmtDate(item.created_at))+' · '+String(item.input_tokens||0)+' + '+String(item.output_tokens||0)+' ток.</small></article>';
   }).join('');
@@ -215,7 +217,7 @@ function reasoningItemsMarkup(r){
 function reasoningPanel(){
   const r=state.reasoning||{configured:false,items:[],usage:{}};
   const blocked=!!r.usage?.blocked;
-  return '<section class="learning-shell"><div class="learning-hero"><div><span class="eyebrow">Разум Тори</span><h2>Логика и решения</h2><p>Разбирает задачу на факты, допущения, варианты и противоречия, затем формирует проверяемый вывод.</p></div><span class="model-pill">Qwen3.6 35B</span></div>'+
+  return '<section class="learning-shell"><div class="learning-hero"><div><span class="eyebrow">Разум Тори · v2</span><h2>Логика, критик и решения</h2><p>Сначала строит разбор, затем независимый критик ищет слабые места, недостающие данные и уточняет итоговый вывод.</p></div><span class="model-pill">Qwen3.6 35B</span></div>'+
     usageStrip(r.usage,'all')+
     '<form id="reasoning-form" class="panel clean-form"><label for="reasoning-problem">Задача или решение</label><textarea id="reasoning-problem" name="problem" maxlength="12000" rows="5" placeholder="Например: какой следующий модуль TOORU делать и почему?" required '+(r.configured&&!blocked?'':'disabled')+'></textarea>'+
     '<label class="context-toggle"><input type="checkbox" name="use_context" value="1" checked> Использовать релевантную Память и Знания</label>'+
@@ -265,9 +267,10 @@ function learningPanel(){
       <div class="budget-fields">
         <label>Минимальная уверенность<input name="min_confidence" type="number" min="0.50" max="0.95" step="0.05" value="${q.automation?.min_confidence??0.75}"></label>
         <label>Лимит задач в день<input name="daily_limit" type="number" min="1" max="20" step="1" value="${q.automation?.daily_limit??5}"></label>
+        <label>Глубина цепочки по теме<input name="chain_limit" type="number" min="1" max="6" step="1" value="${q.automation?.chain_limit??3}"></label>
       </div>
       <button class="primary" type="submit">Сохранить самообучение</button>
-      <p class="hint">Сегодня автоматически добавлено: ${q.automation?.today_count||0} из ${q.automation?.daily_limit||5}. Автоматизация принимает только предложения типа «обучение». Память и личные факты остаются под твоим подтверждением.</p>
+      <p class="hint">Сегодня автоматически добавлено: ${q.automation?.today_count||0} из ${q.automation?.daily_limit||5}. Сначала Тори берёт учебные шаги активных целей, затем — сильные пробелы из самопроверки и Разума. Одна тема ограничена глубиной ${q.automation?.chain_limit||3}. Память и личные факты остаются под твоим подтверждением.</p>
     </form>
   </section>
   <section class="conversation-shell learning-chat"><div class="conversation-head"><div><span class="eyebrow">Живой журнал</span><h2>Разговор обучения</h2></div><span class="status-label">${(q.messages||[]).length} сообщений</span></div><div class="chat-stream" id="learning-chat-stream">${learningConversation(q)}</div></section>
@@ -342,7 +345,7 @@ content.addEventListener('submit',async event=>{
     if(f.id==='appearance-form')await api('settings',{name:state.settings.name,theme:values.theme});
     if(f.id==='ai-config-form')await api('ai/config',values);
     if(f.id==='learning-queue-form')await api('learning/queue',values);
-    if(f.id==='brain-automation-form')await api('brain/automation',{enabled:values.enabled==='1',min_confidence:Number(values.min_confidence),daily_limit:Number(values.daily_limit)});
+    if(f.id==='brain-automation-form')await api('brain/automation',{enabled:values.enabled==='1',min_confidence:Number(values.min_confidence),daily_limit:Number(values.daily_limit),chain_limit:Number(values.chain_limit)});
     if(f.id==='goal-form')await api('brain/goal',values);
     if(f.id==='reasoning-form')await api('brain/reason',{problem:values.problem,use_context:values.use_context==='1'});
     if(f.id==='chat-form'){await api('chat/send',{text:values.text,use_context:values.use_context==='1',analyze:values.analyze==='1'});f.reset();for(const name of ['use_context','analyze']){const toggle=f.querySelector('[name="'+name+'"]');if(toggle)toggle.checked=true}}
