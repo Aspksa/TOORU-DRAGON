@@ -424,6 +424,9 @@ class Storage:
                 ('dragon_notifications', '1'),
                 ('dragon_delete_files', '0'),
                 ('dragon_mode', 'suggest'),
+                ('brain_experiment_daily_limit', '3'),
+                ('brain_experiment_day', ''),
+                ('brain_experiment_count', '0'),
             ):
                 db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', (key, value))
             db.execute(
@@ -949,6 +952,45 @@ class Storage:
                 )
             logging.warning('Brain experiment %s failed: %s', row['id'], exc)
             return {'id': row['id'], 'status': 'error', 'error': str(exc)}
+
+    def promote_autonomous_experiment(self):
+        if self.usage_summary().get('blocked'):
+            return None
+        today = time.strftime('%Y-%m-%d', time.gmtime())
+        with self.connect() as db:
+            settings = dict(db.execute(
+                "SELECT key,value FROM settings WHERE key IN "
+                "('learning_mode','brain_auto_learning','brain_experiment_daily_limit',"
+                "'brain_experiment_day','brain_experiment_count')"
+            ).fetchall())
+            if settings.get('learning_mode') != 'running' or settings.get('brain_auto_learning') != '1':
+                return None
+            try:
+                limit = max(1, min(int(settings.get('brain_experiment_daily_limit', '3')), 8))
+            except (TypeError, ValueError):
+                limit = 3
+            count = (
+                int(settings.get('brain_experiment_count', '0') or 0)
+                if settings.get('brain_experiment_day') == today else 0
+            )
+            if count >= limit:
+                return None
+            running = db.execute(
+                "SELECT 1 FROM brain_experiments WHERE status='running' LIMIT 1"
+            ).fetchone()
+            if running:
+                return None
+            row = db.execute(
+                "SELECT id FROM brain_experiments WHERE status='planned' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            db.executemany(
+                'INSERT OR REPLACE INTO settings VALUES (?,?)',
+                [('brain_experiment_day', today), ('brain_experiment_count', str(count + 1))]
+            )
+            experiment_id = row['id']
+        return self.run_brain_experiment(experiment_id)
 
     def brain_lab_state(self):
         return {
@@ -1696,7 +1738,8 @@ class Storage:
             settings = dict(db.execute(
                 "SELECT key,value FROM settings WHERE key IN "
                 "('learning_mode','ai_folder_id','ai_model','ai_last_success','ai_auth_type','secret.yandex_api_key',"
-                "'brain_auto_learning','brain_auto_min_confidence','brain_auto_daily_limit','brain_auto_chain_limit','brain_auto_day','brain_auto_count')"
+                "'brain_auto_learning','brain_auto_min_confidence','brain_auto_daily_limit','brain_auto_chain_limit','brain_auto_day','brain_auto_count',"
+                "'brain_experiment_daily_limit','brain_experiment_day','brain_experiment_count')"
             ).fetchall())
             queue = [dict(row) for row in db.execute(
                 'SELECT id,topic,question,status,attempts,substr(response_text,1,1200) AS response_text,'
@@ -1738,6 +1781,12 @@ class Storage:
                 'today_count': (
                     int(settings.get('brain_auto_count', '0') or 0)
                     if settings.get('brain_auto_day', '') == time.strftime('%Y-%m-%d', time.gmtime())
+                    else 0
+                ),
+                'experiment_daily_limit': int(settings.get('brain_experiment_daily_limit', '3') or 3),
+                'experiment_today_count': (
+                    int(settings.get('brain_experiment_count', '0') or 0)
+                    if settings.get('brain_experiment_day', '') == time.strftime('%Y-%m-%d', time.gmtime())
                     else 0
                 ),
             },
@@ -2903,9 +2952,7 @@ class LearningWorker(threading.Thread):
             except Exception as exc:
                 logging.warning('Brain automation cycle failed: %s', exc)
             try:
-                automation = self.storage.learning_state().get('automation', {})
-                if automation.get('enabled') and not self.storage.usage_summary().get('blocked'):
-                    self.storage.run_brain_experiment()
+                self.storage.promote_autonomous_experiment()
             except Exception as exc:
                 logging.warning('Brain experiment cycle failed: %s', exc)
             item = self.storage.claim_learning()
