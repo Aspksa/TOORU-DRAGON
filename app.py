@@ -41,7 +41,7 @@ class Storage:
             (self.directory / name).mkdir(exist_ok=True)
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 8:
+            if version > 9:
                 raise RuntimeError('База создана более новой версией TOORU. Обновите программу.')
             db.execute('PRAGMA journal_mode=WAL')
             db.executescript('''
@@ -118,6 +118,27 @@ class Storage:
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                 );
                 CREATE INDEX IF NOT EXISTS brain_reasoning_id ON brain_reasoning(id DESC);
+                CREATE TABLE IF NOT EXISTS dragon_notifications (
+                    id INTEGER PRIMARY KEY,
+                    level TEXT NOT NULL DEFAULT 'info',
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL DEFAULT '',
+                    action TEXT NOT NULL DEFAULT '',
+                    is_read INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS dragon_notifications_read_id
+                    ON dragon_notifications(is_read, id DESC);
+                CREATE TABLE IF NOT EXISTS dragon_actions (
+                    id INTEGER PRIMARY KEY,
+                    capability TEXT NOT NULL,
+                    target TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'done',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                );
+                CREATE INDEX IF NOT EXISTS dragon_actions_id ON dragon_actions(id DESC);
             ''')
             if version < 3:
                 old_queue = db.execute(
@@ -222,6 +243,31 @@ class Storage:
                         ON brain_reasoning(id DESC);
                 """)
                 db.execute('PRAGMA user_version=8')
+            if version < 9:
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS dragon_notifications (
+                        id INTEGER PRIMARY KEY,
+                        level TEXT NOT NULL DEFAULT 'info',
+                        title TEXT NOT NULL,
+                        body TEXT NOT NULL DEFAULT '',
+                        action TEXT NOT NULL DEFAULT '',
+                        is_read INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS dragon_notifications_read_id
+                        ON dragon_notifications(is_read, id DESC);
+                    CREATE TABLE IF NOT EXISTS dragon_actions (
+                        id INTEGER PRIMARY KEY,
+                        capability TEXT NOT NULL,
+                        target TEXT NOT NULL DEFAULT '',
+                        summary TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'done',
+                        details_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                    );
+                    CREATE INDEX IF NOT EXISTS dragon_actions_id ON dragon_actions(id DESC);
+                """)
+                db.execute('PRAGMA user_version=9')
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('name', 'Aspksa'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', ('theme', 'system'))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
@@ -236,6 +282,17 @@ class Storage:
                        ('ai_output_rub_per_1k', str(DEFAULT_OUTPUT_RUB_PER_1K)))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',
                        ('ai_monthly_budget_rub', str(DEFAULT_MONTHLY_BUDGET_RUB)))
+            for key, value in (
+                ('dragon_name', 'Дракончик Тоору'),
+                ('dragon_project_read', '1'),
+                ('dragon_project_write', '1'),
+                ('dragon_data_manage', '1'),
+                ('dragon_brain_auto', '1'),
+                ('dragon_update_check', '1'),
+                ('dragon_notifications', '1'),
+                ('dragon_delete_files', '0'),
+            ):
+                db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)', (key, value))
 
     @contextmanager
     def connect(self):
@@ -259,9 +316,10 @@ class Storage:
         learning = self.learning_state()
         chat = self.chat_state()
         reasoning = self.reasoning_state()
+        dragon = self.dragon_status()
         return dict(version=VERSION, settings=settings, counts=counts, records=records,
                     ai_connected=learning['configured'] and learning['last_success'] > 0,
-                    learning=learning, chat=chat, reasoning=reasoning)
+                    learning=learning, chat=chat, reasoning=reasoning, dragon=dragon)
 
     def add(self, item):
         kind, title = item.get('kind'), item.get('title', '')
@@ -1662,6 +1720,201 @@ class Storage:
             source.backup(target)
         return destination.name
 
+    def dragon_permissions(self):
+        keys = (
+            'dragon_project_read','dragon_project_write','dragon_data_manage',
+            'dragon_brain_auto','dragon_update_check','dragon_notifications','dragon_delete_files'
+        )
+        with self.connect() as db:
+            values = dict(db.execute(
+                "SELECT key,value FROM settings WHERE key IN (" + ",".join("?" for _ in keys) + ")",
+                keys
+            ).fetchall())
+        return {
+            'project_read': values.get('dragon_project_read', '1') == '1',
+            'project_write': values.get('dragon_project_write', '1') == '1',
+            'data_manage': values.get('dragon_data_manage', '1') == '1',
+            'brain_auto': values.get('dragon_brain_auto', '1') == '1',
+            'update_check': values.get('dragon_update_check', '1') == '1',
+            'notifications': values.get('dragon_notifications', '1') == '1',
+            'delete_files': values.get('dragon_delete_files', '0') == '1',
+        }
+
+    def save_dragon_permissions(self, item):
+        allowed = {
+            'project_read':'dragon_project_read',
+            'project_write':'dragon_project_write',
+            'data_manage':'dragon_data_manage',
+            'brain_auto':'dragon_brain_auto',
+            'update_check':'dragon_update_check',
+            'notifications':'dragon_notifications',
+            'delete_files':'dragon_delete_files',
+        }
+        values = []
+        for public, key in allowed.items():
+            value = item.get(public)
+            if type(value) is not bool:
+                raise ValueError('Все разрешения Дракончика Тоору должны быть включены или выключены явно.')
+            values.append((key, '1' if value else '0'))
+        with self.connect() as db:
+            db.executemany('INSERT OR REPLACE INTO settings VALUES (?,?)', values)
+        self.dragon_notify(
+            'success', 'Права обновлены',
+            'Разрешения Дракончика Тоору сохранены.', action='permissions'
+        )
+        return self.dragon_status()
+
+    @staticmethod
+    def _dragon_project_path(relative):
+        if not isinstance(relative, str) or not relative.strip() or len(relative) > 500:
+            raise ValueError('Некорректный путь проекта.')
+        relative = relative.replace('\\', '/').strip('/')
+        candidate = (ROOT / relative).resolve()
+        try:
+            candidate.relative_to(ROOT)
+        except ValueError:
+            raise ValueError('Путь выходит за пределы проекта.') from None
+        protected = {'.git', 'python', 'data', 'backups'}
+        parts = candidate.relative_to(ROOT).parts
+        if parts and (parts[0] in protected or parts[0].startswith('.update-') or parts[0].startswith('.setup-')):
+            raise ValueError('Это защищённая служебная зона проекта.')
+        return candidate
+
+    def dragon_project_tree(self, limit=1200):
+        if not self.dragon_permissions()['project_read']:
+            raise ValueError('У Дракончика Тоору отключено чтение проекта.')
+        rows = []
+        skip = {'.git','python','data','backups','__pycache__'}
+        for base, dirs, files in os.walk(ROOT):
+            base_path = Path(base)
+            rel_base = base_path.relative_to(ROOT)
+            dirs[:] = [name for name in dirs if name not in skip and not name.startswith(('.update-','.setup-'))]
+            for name in files:
+                path = base_path / name
+                rel = path.relative_to(ROOT).as_posix()
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    size = 0
+                rows.append({'path': rel, 'size': size})
+                if len(rows) >= max(1, min(int(limit), 5000)):
+                    return rows
+        return rows
+
+    def dragon_read_project_file(self, relative):
+        if not self.dragon_permissions()['project_read']:
+            raise ValueError('У Дракончика Тоору отключено чтение проекта.')
+        path = self._dragon_project_path(relative)
+        if not path.is_file():
+            raise ValueError('Файл проекта не найден.')
+        if path.stat().st_size > 300000:
+            raise ValueError('Файл слишком большой для чтения через помощника.')
+        try:
+            text = path.read_text('utf-8')
+        except UnicodeDecodeError:
+            raise ValueError('Этот файл не является UTF-8 текстом.') from None
+        self.dragon_log_action('project_read', path.relative_to(ROOT).as_posix(), 'Прочитан файл проекта')
+        return {'path': path.relative_to(ROOT).as_posix(), 'text': text}
+
+    def dragon_write_project_file(self, item):
+        if not self.dragon_permissions()['project_write']:
+            raise ValueError('У Дракончика Тоору отключено изменение проекта.')
+        relative = item.get('path', '')
+        content = item.get('content', '')
+        if not isinstance(content, str) or len(content.encode('utf-8')) > 500000:
+            raise ValueError('Текст файла слишком большой.')
+        path = self._dragon_project_path(relative)
+        allowed_ext = {'.py','.js','.css','.html','.md','.json','.jsonl','.bat','.yml','.yaml','.txt'}
+        if path.suffix.lower() not in allowed_ext:
+            raise ValueError('Этот тип файла нельзя менять через помощника.')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = path.read_text('utf-8') if path.exists() else None
+        backup_name = ''
+        if old is not None:
+            backup_dir = self.directory / 'backups' / 'dragon-project'
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256(relative.encode('utf-8')).hexdigest()[:12]
+            backup = backup_dir / (time.strftime('%Y%m%d-%H%M%S-') + digest + path.suffix)
+            backup.write_text(old, 'utf-8')
+            backup_name = str(backup.relative_to(self.directory))
+        temp = path.with_name(path.name + '.dragon-new')
+        temp.write_text(content, 'utf-8')
+        os.replace(temp, path)
+        self.dragon_log_action(
+            'project_write', path.relative_to(ROOT).as_posix(),
+            'Изменён файл проекта', {'backup': backup_name, 'bytes': len(content.encode('utf-8'))}
+        )
+        self.dragon_notify(
+            'success', 'Проект изменён',
+            path.relative_to(ROOT).as_posix(), action='project_write'
+        )
+        return {'ok': True, 'path': path.relative_to(ROOT).as_posix(), 'backup': backup_name}
+
+    def dragon_log_action(self, capability, target, summary, details=None, status='done'):
+        with self.connect() as db:
+            cursor = db.execute(
+                'INSERT INTO dragon_actions(capability,target,summary,status,details_json) VALUES (?,?,?,?,?)',
+                (str(capability)[:80], str(target)[:500], str(summary)[:1000],
+                 str(status)[:40], json.dumps(details or {}, ensure_ascii=False))
+            )
+            return cursor.lastrowid
+
+    def dragon_notify(self, level, title, body='', action=''):
+        if not self.dragon_permissions().get('notifications', True):
+            return None
+        if level not in {'info','success','warning','error'}:
+            level = 'info'
+        with self.connect() as db:
+            cursor = db.execute(
+                'INSERT INTO dragon_notifications(level,title,body,action) VALUES (?,?,?,?)',
+                (level, str(title)[:300], str(body)[:2000], str(action)[:120])
+            )
+            return cursor.lastrowid
+
+    def dragon_notifications(self, unread_only=False, limit=30):
+        query = 'SELECT id,level,title,body,action,is_read,created_at FROM dragon_notifications'
+        params = []
+        if unread_only:
+            query += ' WHERE is_read=0'
+        query += ' ORDER BY id DESC LIMIT ?'
+        params.append(max(1, min(int(limit), 100)))
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(query, params)]
+
+    def dragon_mark_notifications(self, ids=None):
+        with self.connect() as db:
+            if ids is None:
+                db.execute('UPDATE dragon_notifications SET is_read=1 WHERE is_read=0')
+            else:
+                clean = [value for value in ids if type(value) is int][:100]
+                if clean:
+                    db.executemany('UPDATE dragon_notifications SET is_read=1 WHERE id=?',
+                                   [(value,) for value in clean])
+        return {'ok': True}
+
+    def dragon_status(self):
+        with self.connect() as db:
+            name = db.execute("SELECT value FROM settings WHERE key='dragon_name'").fetchone()
+            actions = [dict(row) for row in db.execute(
+                'SELECT id,capability,target,summary,status,details_json,created_at '
+                'FROM dragon_actions ORDER BY id DESC LIMIT 20'
+            )]
+            unread = db.execute(
+                'SELECT count(*) FROM dragon_notifications WHERE is_read=0'
+            ).fetchone()[0]
+        for row in actions:
+            try:
+                row['details'] = json.loads(row.pop('details_json') or '{}')
+            except (ValueError, TypeError):
+                row['details'] = {}
+        return {
+            'name': name[0] if name else 'Дракончик Тоору',
+            'permissions': self.dragon_permissions(),
+            'unread_notifications': unread,
+            'notifications': self.dragon_notifications(False, 20),
+            'actions': actions,
+        }
+
     def diagnostics(self):
         with self.connect() as db:
             check = db.execute('PRAGMA quick_check').fetchone()[0]
@@ -1925,6 +2178,10 @@ def make_server(storage, port=8765):
                     self.send(200, storage.chat_state())
                 elif self.path == '/api/brain/reason/status':
                     self.send(200, storage.reasoning_state())
+                elif self.path == '/api/dragon/status':
+                    self.send(200, storage.dragon_status())
+                elif self.path == '/api/dragon/project':
+                    self.send(200, {'files': storage.dragon_project_tree()})
                 elif self.path == '/api/update/status':
                     self.send(200, updater.local_status(ROOT))
                 else:
@@ -1985,6 +2242,14 @@ def make_server(storage, port=8765):
                     self.send(201, storage.create_goal(item))
                 elif self.path == '/api/brain/goal/action':
                     self.send(200, storage.goal_action(item))
+                elif self.path == '/api/dragon/permissions':
+                    self.send(200, storage.save_dragon_permissions(item))
+                elif self.path == '/api/dragon/project/read':
+                    self.send(200, storage.dragon_read_project_file(item.get('path', '')))
+                elif self.path == '/api/dragon/project/write':
+                    self.send(200, storage.dragon_write_project_file(item))
+                elif self.path == '/api/dragon/notifications/read':
+                    self.send(200, storage.dragon_mark_notifications(item.get('ids')))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
                 elif self.path == '/api/update/start':

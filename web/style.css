@@ -42,3 +42,12 @@
 
 .goal-form{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:10px;margin:12px 0 16px}.goal-form input,.goal-form textarea{margin:0}.goal-list{display:grid;gap:12px}.goal-card{border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:16px}.goal-card h3{margin:5px 0 0}.goal-card>p{white-space:pre-wrap}.goal-card>small{display:block;color:var(--muted);margin:8px 0 12px}.goal-steps{display:grid;gap:8px}.goal-step{display:grid;grid-template-columns:26px minmax(0,1fr) auto auto;gap:10px;align-items:center;border-top:1px solid var(--line);padding-top:9px}.goal-step>span{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;background:var(--bg);font-size:11px}.goal-step div{display:flex;flex-direction:column;gap:2px}.goal-step small{color:var(--muted)}.goal-step em{font-size:10px;color:var(--muted);font-style:normal}.goal-step.is-done{opacity:.55}.review-box{margin:9px 0 0;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--bg);display:grid;grid-template-columns:1fr auto;gap:4px 10px}.review-box strong{font-size:12px}.review-box span{font-size:11px;color:var(--muted)}.review-box p{grid-column:1/-1;margin:3px 0 0;font-size:12px;color:var(--muted)}
 @media(max-width:800px){.goal-form{grid-template-columns:1fr}.goal-step{grid-template-columns:26px minmax(0,1fr)}.goal-step em,.goal-step button{grid-column:2}}
+
+.dragon-toast-host{position:fixed;right:20px;bottom:20px;z-index:9999;display:grid;gap:10px;max-width:min(380px,calc(100vw - 32px))}
+.dragon-toast{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:14px 16px;border:1px solid var(--border);border-radius:16px;background:var(--panel);box-shadow:0 16px 40px rgba(0,0,0,.18);animation:dragon-pop .18s ease-out}
+.dragon-toast strong{display:block;margin-bottom:4px}.dragon-toast p{margin:0;color:var(--muted);font-size:.92rem;line-height:1.4}
+.dragon-toast button{border:0;background:transparent;color:var(--muted);font-size:1.3rem;cursor:pointer;padding:0 2px}
+.dragon-toast.level-success{border-left:4px solid #38a169}.dragon-toast.level-warning{border-left:4px solid #d69e2e}.dragon-toast.level-error{border-left:4px solid #e53e3e}
+.dragon-action-list{display:grid;gap:8px;margin-top:12px}
+@keyframes dragon-pop{from{transform:translateY(8px);opacity:0}to{transform:translateY(0);opacity:1}}
+@media(max-width:700px){.dragon-toast-host{right:12px;left:12px;bottom:12px;max-width:none}}
