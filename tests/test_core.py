@@ -1205,6 +1205,48 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(experiment['status'], 'done')
         self.assertAlmostEqual(experiment['confidence_after'], 0.92, places=2)
 
+    def test_autonomous_experiments_are_bounded_by_daily_limit(self):
+        self.request('/api/ai/config', {
+            'folder_id': 'b1gpcfme4j9b9bv37hqb',
+            'model': 'qwen3.6-35b-a3b/latest',
+            'api_key': 'secret-test-key-value',
+        })
+        self.request('/api/brain/automation', {
+            'enabled': True,
+            'min_confidence': 0.75,
+            'daily_limit': 5,
+            'chain_limit': 3,
+        })
+        created = []
+        for index in range(4):
+            created.append(self.storage.create_brain_experiment({
+                'hypothesis': f'Проверяемая гипотеза {index}',
+                'experiment_type': 'knowledge_check',
+                'plan': 'Проверить локальные знания.',
+                'expected_result': 'Получить проверяемые данные.',
+                'confidence_before': 0.5,
+            })['id'])
+        verdict = {
+            'verdict': 'inconclusive',
+            'actual_result': 'Недостаточно локальных данных.',
+            'confidence_after': 0.5,
+            'lesson': 'Нужны дополнительные данные.',
+        }
+        with patch('app.call_yandex_ai', return_value={
+            'text': json.dumps(verdict, ensure_ascii=False),
+            'input_tokens': 5, 'output_tokens': 4,
+        }):
+            for _ in range(4):
+                self.storage.promote_autonomous_experiment()
+        state = self.storage.brain_lab_state()
+        done = [x for x in state['experiments'] if x['id'] in created and x['status'] == 'done']
+        planned = [x for x in state['experiments'] if x['id'] in created and x['status'] == 'planned']
+        self.assertEqual(len(done), 3)
+        self.assertEqual(len(planned), 1)
+        automation = self.storage.learning_state()['automation']
+        self.assertEqual(automation['experiment_today_count'], 3)
+        self.assertEqual(automation['experiment_daily_limit'], 3)
+
     def test_work_context_is_in_chat_prompt(self):
         self.request('/api/ai/config', {
             'folder_id': 'b1gpcfme4j9b9bv37hqb',
