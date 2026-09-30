@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+import updater
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent
@@ -1360,6 +1361,8 @@ def make_server(storage, port=8765):
                     self.send(200, storage.learning_state())
                 elif self.path == '/api/chat/status':
                     self.send(200, storage.chat_state())
+                elif self.path == '/api/update/status':
+                    self.send(200, updater.local_status(ROOT))
                 else:
                     self.send(404, {'error': 'Страница не найдена.'})
             except Exception:
@@ -1416,6 +1419,20 @@ def make_server(storage, port=8765):
                     self.send(200, storage.goal_action(item))
                 elif self.path == '/api/backup':
                     self.send(200, {'filename': storage.backup()})
+                elif self.path == '/api/update/start':
+                    status = updater.local_status(ROOT)
+                    if status['tracked'] and not status['update_available']:
+                        self.send(200, {'ok': True, 'already_current': True})
+                    else:
+                        database_backup = storage.backup()
+                        updater.start_background_update(ROOT, os.getpid(), status['latest_revision'])
+                        self.send(202, {
+                            'ok': True,
+                            'restarting': True,
+                            'database_backup': database_backup,
+                            'latest_revision': status['latest_revision'],
+                        })
+                        threading.Thread(target=self.server.shutdown, daemon=True).start()
                 else:
                     self.send(404, {'error': 'Действие не найдено.'})
             except (ValueError, UnicodeError) as exc:
