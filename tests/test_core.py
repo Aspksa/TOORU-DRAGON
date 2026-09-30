@@ -236,6 +236,7 @@ class CoreTest(unittest.TestCase):
                     "VALUES (1,'Сети','Как работает роутер?','done','Маршрутизатор пересылает пакеты.',20,10,"
                     "'2026-09-30T00:00:00Z','2026-09-30T00:01:00Z')"
                 )
+                db.commit()
             migrated = app.Storage(temporary)
             messages = migrated.learning_state()['messages']
             self.assertEqual([m['role'] for m in messages], ['tori', 'qwen'])
