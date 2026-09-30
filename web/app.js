@@ -196,6 +196,33 @@ function chatPanel(){
     ${!c.configured?'<p class="hint">Сначала добавь API-ключ в разделе «Настройки».</p>':blocked?'<p class="hint warning">Месячный лимит достигнут. Измени бюджет в Настройках.</p>':''}
   </section>${brainSuggestionsMarkup(c.suggestions)}${brainGoalsMarkup(c.goals)}`;
 }
+function reasoningItemsMarkup(r){
+  const rows=r.items||[];
+  if(!rows.length)return '<div class="empty-state">Разборов пока нет.</div>';
+  return rows.map(item=>{
+    const x=item.result||{};
+    const list=(title,values)=>Array.isArray(values)&&values.length?'<div class="review-box"><strong>'+escapeHtml(title)+'</strong><ul>'+values.map(v=>'<li>'+escapeHtml(v)+'</li>').join('')+'</ul></div>':'';
+    const options=Array.isArray(x.options)&&x.options.length?'<div class="goal-steps">'+x.options.map((o,index)=>'<div class="goal-step"><span>'+String(index+1)+'</span><div><strong>'+escapeHtml(o.title||'Вариант')+'</strong>'+(o.pros?.length?'<small>Плюсы: '+escapeHtml(o.pros.join(' · '))+'</small>':'')+(o.cons?.length?'<small>Минусы: '+escapeHtml(o.cons.join(' · '))+'</small>':'')+'</div></div>').join('')+'</div>':'';
+    const sources=(item.context||[]).length?'<small>Контекст: '+item.context.map(s=>escapeHtml(s.title)).join(' · ')+'</small>':'';
+    return '<article class="goal-card"><div class="brain-card-head"><div><span class="brain-kind">Логический разбор</span><h3>'+escapeHtml(item.problem)+'</h3></div><span class="status-label">'+Math.round((Number(x.confidence)||0)*100)+'%</span></div>'+
+      (x.summary?'<p>'+escapeHtml(x.summary)+'</p>':'')+
+      list('Факты',x.facts)+list('Допущения',x.assumptions)+options+list('Противоречия',x.contradictions)+
+      (x.decision?'<div class="review-box"><strong>Решение</strong><p>'+escapeHtml(x.decision)+'</p></div>':'')+
+      (x.next_step?'<p><strong>Следующий шаг:</strong> '+escapeHtml(x.next_step)+'</p>':'')+
+      sources+'<small>'+escapeHtml(fmtDate(item.created_at))+' · '+String(item.input_tokens||0)+' + '+String(item.output_tokens||0)+' ток.</small></article>';
+  }).join('');
+}
+function reasoningPanel(){
+  const r=state.reasoning||{configured:false,items:[],usage:{}};
+  const blocked=!!r.usage?.blocked;
+  return '<section class="learning-shell"><div class="learning-hero"><div><span class="eyebrow">Разум Тори</span><h2>Логика и решения</h2><p>Разбирает задачу на факты, допущения, варианты и противоречия, затем формирует проверяемый вывод.</p></div><span class="model-pill">Qwen3.6 35B</span></div>'+
+    usageStrip(r.usage,'all')+
+    '<form id="reasoning-form" class="panel clean-form"><label for="reasoning-problem">Задача или решение</label><textarea id="reasoning-problem" name="problem" maxlength="12000" rows="5" placeholder="Например: какой следующий модуль TOORU делать и почему?" required '+(r.configured&&!blocked?'':'disabled')+'></textarea>'+
+    '<label class="context-toggle"><input type="checkbox" name="use_context" value="1" checked> Использовать релевантную Память и Знания</label>'+
+    '<button class="primary" '+(r.configured&&!blocked?'':'disabled')+'>Разобрать логически</button></form>'+
+    (!r.configured?'<p class="hint">Сначала настрой AI Studio.</p>':blocked?'<p class="hint warning">Месячный лимит AI достигнут.</p>':'')+
+    '</section><section class="panel compact-panel"><div class="section-head"><div><span class="eyebrow">История</span><h2>Разборы Тори</h2></div></div>'+reasoningItemsMarkup(r)+'</section>';
+}
 function learningQueueMarkup(q){
   const labels={pending:'В очереди',running:'Получает ответ',done:'Готово',stale:'Зависла',error:'Ошибка',cancelled:'Отменена',skipped:'Пропущена'};
   const rows=q.queue||[];
@@ -270,9 +297,10 @@ function render(){
   else if(page==='work')content.innerHTML=projectPanel('work','Рабочие проекты');
   else if(page==='home')content.innerHTML=projectPanel('home','Домашние проекты');
   else if(page==='ai'){
-    const tabs={chat:'Чат',memory:'Память',knowledge:'Знания',topic:'Обучение'};
+    const tabs={chat:'Чат',reasoning:'Разум',memory:'Память',knowledge:'Знания',topic:'Обучение'};
     let html='<div class="tabs" role="tablist" aria-label="Разделы Tooru/Ai">'+Object.entries(tabs).map(([key,value])=>`<button class="tab" role="tab" aria-selected="${tab===key}" data-tab="${key}">${value}</button>`).join('')+'</div>';
     if(tab==='chat')html+=chatPanel();
+    if(tab==='reasoning')html+=reasoningPanel();
     if(tab==='memory')html+=libraryPanel('memory','Память Тори','Факты и предпочтения, которые ты сохраняешь вручную. Они пока не отправляются модели автоматически.','Что запомнить','Подробности');
     if(tab==='knowledge')html+=libraryPanel('knowledge','Знания','Материалы, полученные во время обучения и добавленные вручную.','Название','Содержание');
     if(tab==='topic')html+=learningPanel();
@@ -316,9 +344,10 @@ content.addEventListener('submit',async event=>{
     if(f.id==='learning-queue-form')await api('learning/queue',values);
     if(f.id==='brain-automation-form')await api('brain/automation',{enabled:values.enabled==='1',min_confidence:Number(values.min_confidence),daily_limit:Number(values.daily_limit)});
     if(f.id==='goal-form')await api('brain/goal',values);
+    if(f.id==='reasoning-form')await api('brain/reason',{problem:values.problem,use_context:values.use_context==='1'});
     if(f.id==='chat-form'){await api('chat/send',{text:values.text,use_context:values.use_context==='1',analyze:values.analyze==='1'});f.reset();for(const name of ['use_context','analyze']){const toggle=f.querySelector('[name="'+name+'"]');if(toggle)toggle.checked=true}}
     await reload();render();
-    message(f.id==='chat-form'?'Тори ответила.':'Сохранено.');
+    message(f.id==='chat-form'?'Тори ответила.':f.id==='reasoning-form'?'Логический разбор готов.':'Сохранено.');
   }catch(error){message(error.message)}finally{if(b)b.disabled=false}
 });
 async function refreshLearningStatus(){
